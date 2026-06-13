@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- shopops_v1_shop.yaml
+- shopops_v1_discordchannel.yaml
+- shopops_v1_wallet.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
