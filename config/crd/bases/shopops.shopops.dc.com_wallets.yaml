@@ -14,7 +14,20 @@ spec:
     singular: wallet
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.network
+      name: Network
+      type: string
+    - jsonPath: .status.address
+      name: Address
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
         description: Wallet is the Schema for the wallets API
@@ -37,27 +50,29 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Wallet
+            description: WalletSpec defines the desired state of Wallet
             properties:
-              foo:
-                description: foo is an example field of Wallet. Edit wallet_types.go
-                  to remove/update
+              network:
+                default: sepolia
+                description: network is the Ethereum network this wallet operates
+                  on.
+                enum:
+                - sepolia
+                - mainnet
                 type: string
+            required:
+            - network
             type: object
           status:
-            description: status defines the observed state of Wallet
+            description: WalletStatus defines the observed state of Wallet.
             properties:
+              address:
+                description: address is the public Ethereum address derived from the
+                  generated keypair.
+                type: string
               conditions:
-                description: |-
-                  conditions represent the current state of the Wallet resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                description: conditions represent the current state of the Wallet
+                  resource.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +131,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              secretRef:
+                description: secretRef is the name of the Secret holding the private
+                  key in the same namespace.
+                type: string
             type: object
         required:
         - spec
