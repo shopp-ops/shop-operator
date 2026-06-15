@@ -1,0 +1,9 @@
+apiVersion: shopops.shopops.dc.com/v1
+kind: Wallet
+metadata:
+  labels:
+    app.kubernetes.io/name: shop-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: wallet-sample
+spec:
+  # TODO(user): Add fields here
