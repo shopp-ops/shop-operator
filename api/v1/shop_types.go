@@ -34,7 +34,6 @@ const (
 	DatabaseLight    DatabaseType = "light"    // Redis via REDB operator
 )
 
-
 type ShopDatabase struct {
 	// +kubebuilder:validation:Enum=standard;light
 	Type DatabaseType `json:"type"`

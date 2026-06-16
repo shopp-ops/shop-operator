@@ -11,10 +11,28 @@ spec:
     kind: Shop
     listKind: ShopList
     plural: shops
+    shortNames:
+    - sh
     singular: shop
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.availability
+      name: Availability
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
         description: Shop is the Schema for the shops API
@@ -39,25 +57,47 @@ spec:
           spec:
             description: spec defines the desired state of Shop
             properties:
-              foo:
-                description: foo is an example field of Shop. Edit shop_types.go to
-                  remove/update
+              availability:
+                enum:
+                - standard
+                - high
                 type: string
+              database:
+                description: Database configuration.
+                properties:
+                  type:
+                    enum:
+                    - standard
+                    - light
+                    type: string
+                required:
+                - type
+                type: object
+              discordChannelRef:
+                description: Name of the DiscordChannel CR to use for alerts.
+                type: string
+              host:
+                description: Ingress hostname for the shop (e.g. myshop.example.com).
+                type: string
+              image:
+                description: Docker image for the shop application.
+                type: string
+              name:
+                description: Display name of the shop.
+                type: string
+              walletAddress:
+                description: Ethereum-compatible wallet address for receiving payments.
+                type: string
+            required:
+            - availability
+            - database
+            - image
+            - name
             type: object
           status:
             description: status defines the observed state of Shop
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the Shop resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +156,16 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              phase:
+                description: Lifecycle phase of the Shop.
+                type: string
+              replicas:
+                description: Number of available replicas.
+                format: int32
+                type: integer
+              url:
+                description: Public URL of the shop (derived from spec.host).
+                type: string
             type: object
         required:
         - spec

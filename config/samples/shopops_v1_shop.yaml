@@ -6,4 +6,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: shop-sample
 spec:
-  # TODO(user): Add fields here
+  name: Sample Shop
+  availability: standard
+  walletAddress: 0x1111111111111111111111111111111111111111
+  database:
+    type: standard
+  image: nginx:latest
+  host: shop.example.com
+  discordChannelRef: shop-alerts
