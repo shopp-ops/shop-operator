@@ -53,8 +53,11 @@ type ShopSpec struct {
 	// Database configuration.
 	Database ShopDatabase `json:"database"`
 
-	// Docker image for the shop application.
-	Image string `json:"image"`
+	// Docker image for the shop backend application.
+	ApiImage string `json:"apiImage"`
+
+	// Docker image for the shop frontend application.
+	WebImage string `json:"webImage"`
 
 	// Ingress hostname for the shop (e.g. myshop.example.com).
 	// +optional

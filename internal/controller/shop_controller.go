@@ -1,19 +1,3 @@
-/*
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
@@ -41,14 +25,24 @@ import (
 )
 
 const (
-	shopContainerPort int32 = 8080
-	servicePort       int32 = 80
+	apiContainerPort int32 = 3000
+	webContainerPort int32 = 3000
+	servicePort      int32 = 80
 )
 
 var cnpgClusterGVK = schema.GroupVersionKind{
 	Group:   "postgresql.cnpg.io",
 	Version: "v1",
 	Kind:    "Cluster",
+}
+
+type deploymentConfig struct {
+	name      string
+	image     string
+	port      int32
+	labels    map[string]string
+	selectors map[string]string
+	env       []corev1.EnvVar
 }
 
 // ShopReconciler reconciles a Shop object
@@ -82,7 +76,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if err := r.reconcileDatabaseSecret(ctx, shop); err != nil {
+	if err := r.reconcileAppSecret(ctx, shop); err != nil {
 		logger.Error(err, "Failed to reconcile Secret")
 		return ctrl.Result{}, err
 	}
@@ -93,14 +87,37 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	deployment, err := r.reconcileDeployment(ctx, shop)
+	apiDeployment, err := r.reconcileDeployment(ctx, shop, deploymentConfig{
+		name:      r.apiDeploymentName(shop),
+		image:     shop.Spec.ApiImage,
+		port:      apiContainerPort,
+		labels:    r.labelsForApi(shop),
+		selectors: r.selectorLabelsForApi(shop),
+		env:       r.apiEnvVars(shop),
+	})
 	if err != nil {
-		logger.Error(err, "Failed to reconcile Deployment")
+		logger.Error(err, "Failed to reconcile API Deployment")
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileService(ctx, shop); err != nil {
-		logger.Error(err, "Failed to reconcile Service")
+	if _, err := r.reconcileDeployment(ctx, shop, deploymentConfig{
+		name:      r.webDeploymentName(shop),
+		image:     shop.Spec.WebImage,
+		port:      webContainerPort,
+		labels:    r.labelsForWeb(shop),
+		selectors: r.selectorLabelsForWeb(shop),
+	}); err != nil {
+		logger.Error(err, "Failed to reconcile Web Deployment")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileService(ctx, shop, r.apiServiceName(shop), apiContainerPort, r.labelsForApi(shop), r.selectorLabelsForApi(shop)); err != nil {
+		logger.Error(err, "Failed to reconcile API Service")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileService(ctx, shop, r.webServiceName(shop), webContainerPort, r.labelsForWeb(shop), r.selectorLabelsForWeb(shop)); err != nil {
+		logger.Error(err, "Failed to reconcile Web Service")
 		return ctrl.Result{}, err
 	}
 
@@ -109,7 +126,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, shop, deployment, databaseCondition); err != nil {
+	if err := r.reconcileStatus(ctx, shop, apiDeployment, databaseCondition); err != nil {
 		logger.Error(err, "Failed to reconcile status")
 		return ctrl.Result{}, err
 	}
@@ -130,8 +147,8 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *ShopReconciler) reconcileDatabaseSecret(ctx context.Context, shop *shopopsv1.Shop) error {
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: r.databaseSecretName(shop), Namespace: shop.Namespace}}
+func (r *ShopReconciler) reconcileAppSecret(ctx context.Context, shop *shopopsv1.Shop) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: r.appSecretName(shop), Namespace: shop.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 		if err := controllerutil.SetControllerReference(shop, secret, r.Scheme); err != nil {
@@ -149,20 +166,38 @@ func (r *ShopReconciler) reconcileDatabaseSecret(ctx context.Context, shop *shop
 			secret.Data = map[string][]byte{}
 		}
 
-		if len(secret.Data["password"]) == 0 {
-			secret.Data["password"] = []byte(fmt.Sprintf("%s-password", shop.Name))
+		if len(secret.Data["db-password"]) == 0 {
+			secret.Data["db-password"] = []byte(fmt.Sprintf("%s-password", shop.Name))
+		}
+		if len(secret.Data["admin-password"]) == 0 {
+			secret.Data["admin-password"] = []byte("changeme")
+		}
+		if len(secret.Data["jwt-secret"]) == 0 {
+			secret.Data["jwt-secret"] = []byte("change-me-in-production")
+		}
+		if len(secret.Data["admin-email"]) == 0 {
+			secret.Data["admin-email"] = []byte("admin@shop.local")
 		}
 
 		secret.Type = corev1.SecretTypeOpaque
+		secret.Data["database-url"] = []byte(fmt.Sprintf(
+			"postgresql://shop:%s@%s:5432/shop",
+			string(secret.Data["db-password"]),
+			r.databaseReadWriteServiceName(shop),
+		))
+
 		secret.Data["username"] = []byte("shop")
-		secret.Data["database"] = []byte("shop")
-		secret.Data["host"] = []byte(r.databaseReadWriteServiceName(shop))
-		secret.Data["port"] = []byte("5432")
+		secret.Data["password"] = secret.Data["db-password"]
+		secret.Data["wallet-address"] = []byte(r.walletAddress(shop))
 
 		return nil
 	})
 
 	return err
+}
+
+func (r *ShopReconciler) appSecretName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-app-secret", shop.Name)
 }
 
 func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
@@ -186,11 +221,15 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 			return err
 		}
 
-		cluster.Object["metadata"] = map[string]any{
-			"name":      cluster.GetName(),
-			"namespace": cluster.GetNamespace(),
-			"labels":    r.labelsForShop(shop),
+		existingLabels := cluster.GetLabels()
+		if existingLabels == nil {
+			existingLabels = map[string]string{}
 		}
+		for k, v := range r.labelsForShop(shop) {
+			existingLabels[k] = v
+		}
+		cluster.SetLabels(existingLabels)
+
 		cluster.Object["spec"] = map[string]any{
 			"instances": 1,
 			"bootstrap": map[string]any{
@@ -198,7 +237,7 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 					"database": "shop",
 					"owner":    "shop",
 					"secret": map[string]any{
-						"name": r.databaseSecretName(shop),
+						"name": r.appSecretName(shop),
 					},
 				},
 			},
@@ -243,68 +282,28 @@ func (r *ShopReconciler) deleteDatabaseCluster(ctx context.Context, shop *shopop
 	return nil
 }
 
-func (r *ShopReconciler) reconcileDeployment(ctx context.Context, shop *shopopsv1.Shop) (*appsv1.Deployment, error) {
+func (r *ShopReconciler) reconcileDeployment(ctx context.Context, shop *shopopsv1.Shop, cfg deploymentConfig) (*appsv1.Deployment, error) {
 	replicas := r.desiredReplicas(shop)
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: shop.Name, Namespace: shop.Namespace}}
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: cfg.name, Namespace: shop.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		if err := controllerutil.SetControllerReference(shop, deployment, r.Scheme); err != nil {
 			return err
 		}
 
-		deployment.Labels = r.labelsForShop(shop)
+		deployment.Labels = cfg.labels
 		deployment.Spec.Replicas = &replicas
-		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: r.selectorLabelsForShop(shop)}
-		deployment.Spec.Template.ObjectMeta.Labels = r.selectorLabelsForShop(shop)
+		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: cfg.selectors}
+		deployment.Spec.Template.ObjectMeta.Labels = cfg.selectors
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{{
-			Name:            "shop",
-			Image:           shop.Spec.Image,
+			Name:            cfg.name,
+			Image:           cfg.image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Ports: []corev1.ContainerPort{{
 				Name:          "http",
-				ContainerPort: shopContainerPort,
+				ContainerPort: cfg.port,
 			}},
-			Env: []corev1.EnvVar{
-				{Name: "SHOP_NAME", Value: r.displayName(shop)},
-				{Name: "WALLET_ADDRESS", Value: r.walletAddress(shop)},
-				{Name: "DISCORD_CHANNEL", Value: r.discordChannel(shop)},
-				{Name: "DATABASE_TYPE", Value: string(shop.Spec.Database.Type)},
-				{
-					Name: "DATABASE_HOST",
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: r.databaseSecretName(shop)},
-						Key:                  "host",
-					}},
-				},
-				{
-					Name: "DATABASE_PORT",
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: r.databaseSecretName(shop)},
-						Key:                  "port",
-					}},
-				},
-				{
-					Name: "DATABASE_NAME",
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: r.databaseSecretName(shop)},
-						Key:                  "database",
-					}},
-				},
-				{
-					Name: "DATABASE_USER",
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: r.databaseSecretName(shop)},
-						Key:                  "username",
-					}},
-				},
-				{
-					Name: "DATABASE_PASSWORD",
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: r.databaseSecretName(shop)},
-						Key:                  "password",
-					}},
-				},
-			},
+			Env: cfg.env,
 		}}
 
 		return nil
@@ -316,21 +315,21 @@ func (r *ShopReconciler) reconcileDeployment(ctx context.Context, shop *shopopsv
 	return deployment, nil
 }
 
-func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shopopsv1.Shop) error {
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: r.serviceName(shop), Namespace: shop.Namespace}}
+func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shopopsv1.Shop, name string, targetPort int32, labels map[string]string, selectors map[string]string) error {
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: shop.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		if err := controllerutil.SetControllerReference(shop, service, r.Scheme); err != nil {
 			return err
 		}
 
-		service.Labels = r.labelsForShop(shop)
-		service.Spec.Selector = r.selectorLabelsForShop(shop)
+		service.Labels = labels
+		service.Spec.Selector = selectors
 		service.Spec.Type = corev1.ServiceTypeClusterIP
 		service.Spec.Ports = []corev1.ServicePort{{
 			Name:       "http",
 			Port:       servicePort,
-			TargetPort: intstr.FromInt32(shopContainerPort),
+			TargetPort: intstr.FromInt32(targetPort),
 		}}
 
 		return nil
@@ -362,16 +361,38 @@ func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shopopsv1.S
 			Host: shop.Spec.Host,
 			IngressRuleValue: networkingv1.IngressRuleValue{
 				HTTP: &networkingv1.HTTPIngressRuleValue{
-					Paths: []networkingv1.HTTPIngressPath{{
-						Path:     "/",
-						PathType: &pathType,
-						Backend: networkingv1.IngressBackend{
-							Service: &networkingv1.IngressServiceBackend{
-								Name: r.serviceName(shop),
-								Port: networkingv1.ServiceBackendPort{Number: servicePort},
+					Paths: []networkingv1.HTTPIngressPath{
+						{
+							Path:     "/api",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: r.apiServiceName(shop),
+									Port: networkingv1.ServiceBackendPort{Number: servicePort},
+								},
 							},
 						},
-					}},
+						{
+							Path:     "/auth",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: r.apiServiceName(shop),
+									Port: networkingv1.ServiceBackendPort{Number: servicePort},
+								},
+							},
+						},
+						{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: r.webServiceName(shop),
+									Port: networkingv1.ServiceBackendPort{Number: servicePort},
+								},
+							},
+						},
+					},
 				},
 			},
 		}}
@@ -443,20 +464,34 @@ func (r *ShopReconciler) desiredReplicas(shop *shopopsv1.Shop) int32 {
 	return 2
 }
 
+func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop) []corev1.EnvVar {
+	secretRef := func(key string) *corev1.EnvVarSource {
+		return &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: r.appSecretName(shop)},
+				Key:                  key,
+			},
+		}
+	}
+
+	return []corev1.EnvVar{
+		{Name: "PORT", Value: fmt.Sprintf("%d", apiContainerPort)},
+		{Name: "CORS_ORIGIN", Value: fmt.Sprintf("http://%s", shop.Spec.Host)},
+		{Name: "DATABASE_URL", ValueFrom: secretRef("database-url")},
+		{Name: "ADMIN_EMAIL", ValueFrom: secretRef("admin-email")},
+		{Name: "ADMIN_PASSWORD", ValueFrom: secretRef("admin-password")},
+		{Name: "JWT_SECRET", ValueFrom: secretRef("jwt-secret")},
+		{Name: "WALLET_ADDRESS", ValueFrom: secretRef("wallet-address")},
+		{Name: "SHOP_NAME", Value: r.displayName(shop)},
+	}
+}
+
 func (r *ShopReconciler) labelsForShop(shop *shopopsv1.Shop) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "shop",
 		"app.kubernetes.io/instance":   shop.Name,
 		"app.kubernetes.io/managed-by": "shop-operator",
 		"shopops.shopops.dc.com/shop":  shop.Name,
-	}
-}
-
-func (r *ShopReconciler) selectorLabelsForShop(shop *shopopsv1.Shop) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":      "shop",
-		"app.kubernetes.io/instance":  shop.Name,
-		"shopops.shopops.dc.com/shop": shop.Name,
 	}
 }
 
@@ -484,16 +519,8 @@ func (r *ShopReconciler) discordChannel(shop *shopopsv1.Shop) string {
 	return "shop-alerts"
 }
 
-func (r *ShopReconciler) serviceName(shop *shopopsv1.Shop) string {
-	return shop.Name
-}
-
 func (r *ShopReconciler) ingressName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-ingress", shop.Name)
-}
-
-func (r *ShopReconciler) databaseSecretName(shop *shopopsv1.Shop) string {
-	return fmt.Sprintf("%s-db-auth", shop.Name)
 }
 
 func (r *ShopReconciler) databaseClusterName(shop *shopopsv1.Shop) string {
@@ -514,4 +541,56 @@ func (r *ShopReconciler) shopURL(shop *shopopsv1.Shop) string {
 
 func namespacedName(namespace, name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: namespace, Name: name}
+}
+
+func (r *ShopReconciler) apiDeploymentName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-api", shop.Name)
+}
+
+func (r *ShopReconciler) webDeploymentName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-web", shop.Name)
+}
+
+func (r *ShopReconciler) apiServiceName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-api", shop.Name)
+}
+
+func (r *ShopReconciler) webServiceName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-web", shop.Name)
+}
+
+func (r *ShopReconciler) labelsForApi(shop *shopopsv1.Shop) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":           "shop-api",
+		"app.kubernetes.io/instance":       shop.Name,
+		"app.kubernetes.io/managed-by":     "shop-operator",
+		"shopops.shopops.dc.com/shop":      shop.Name,
+		"shopops.shopops.dc.com/component": "api",
+	}
+}
+
+func (r *ShopReconciler) selectorLabelsForApi(shop *shopopsv1.Shop) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/instance":       shop.Name,
+		"shopops.shopops.dc.com/shop":      shop.Name,
+		"shopops.shopops.dc.com/component": "api",
+	}
+}
+
+func (r *ShopReconciler) labelsForWeb(shop *shopopsv1.Shop) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":           "shop-web",
+		"app.kubernetes.io/instance":       shop.Name,
+		"app.kubernetes.io/managed-by":     "shop-operator",
+		"shopops.shopops.dc.com/shop":      shop.Name,
+		"shopops.shopops.dc.com/component": "web",
+	}
+}
+
+func (r *ShopReconciler) selectorLabelsForWeb(shop *shopopsv1.Shop) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/instance":       shop.Name,
+		"shopops.shopops.dc.com/shop":      shop.Name,
+		"shopops.shopops.dc.com/component": "web",
+	}
 }

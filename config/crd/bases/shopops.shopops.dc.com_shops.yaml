@@ -57,6 +57,9 @@ spec:
           spec:
             description: spec defines the desired state of Shop
             properties:
+              apiImage:
+                description: Docker image for the shop backend application.
+                type: string
               availability:
                 enum:
                 - standard
@@ -79,20 +82,21 @@ spec:
               host:
                 description: Ingress hostname for the shop (e.g. myshop.example.com).
                 type: string
-              image:
-                description: Docker image for the shop application.
-                type: string
               name:
                 description: Display name of the shop.
                 type: string
               walletAddress:
                 description: Ethereum-compatible wallet address for receiving payments.
                 type: string
+              webImage:
+                description: Docker image for the shop frontend application.
+                type: string
             required:
+            - apiImage
             - availability
             - database
-            - image
             - name
+            - webImage
             type: object
           status:
             description: status defines the observed state of Shop

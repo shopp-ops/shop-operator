@@ -60,7 +60,8 @@ var _ = Describe("Shop Controller", func() {
 					Name:              "My Test Shop",
 					Availability:      shopopsv1.AvailabilityStandard,
 					WalletAddress:     "0x1111111111111111111111111111111111111111",
-					Image:             "nginx:latest",
+					ApiImage:          "nginx:latest",
+					WebImage:          "nginx:latest",
 					Host:              "test-shop.example.com",
 					DiscordChannelRef: "shop-alerts",
 					Database: shopopsv1.ShopDatabase{

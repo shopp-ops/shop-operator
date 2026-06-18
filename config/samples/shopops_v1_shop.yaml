@@ -11,6 +11,7 @@ spec:
   walletAddress: 0x1111111111111111111111111111111111111111
   database:
     type: standard
-  image: nginx:latest
+  apiImage: shop-api:dev
+  webImage: shop-web:dev
   host: shop.example.com
   discordChannelRef: shop-alerts
