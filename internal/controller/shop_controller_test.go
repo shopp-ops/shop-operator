@@ -94,21 +94,29 @@ var _ = Describe("Shop Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			deployment := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, deployment)).To(Succeed())
-			Expect(*deployment.Spec.Replicas).To(Equal(int32(2)))
-			Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
-			Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:latest"))
+			apiDeployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiDeployment)).To(Succeed())
+			Expect(*apiDeployment.Spec.Replicas).To(Equal(int32(2)))
+			Expect(apiDeployment.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(apiDeployment.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:latest"))
 
-			service := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, service)).To(Succeed())
-			Expect(service.Spec.Ports).To(HaveLen(1))
-			Expect(service.Spec.Ports[0].Port).To(Equal(int32(80)))
+			webDeployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-web"), webDeployment)).To(Succeed())
+
+			apiService := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiService)).To(Succeed())
+			Expect(apiService.Spec.Ports).To(HaveLen(1))
+			Expect(apiService.Spec.Ports[0].Port).To(Equal(int32(80)))
+
+			webService := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-web"), webService)).To(Succeed())
 
 			secret := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-db-auth"), secret)).To(Succeed())
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-app-secret"), secret)).To(Succeed())
 			Expect(secret.Data).To(HaveKeyWithValue("username", []byte("shop")))
-			Expect(secret.Data).To(HaveKeyWithValue("database", []byte("shop")))
+			Expect(secret.Data).To(HaveKeyWithValue("password", []byte("test-resource-password")))
+			Expect(secret.Data).To(HaveKey("admin-email"))
+			Expect(secret.Data).To(HaveKey("jwt-secret"))
 
 			ingress := &networkingv1.Ingress{}
 			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-ingress"), ingress)).To(Succeed())

@@ -7,7 +7,9 @@ import (
 	"reflect"
 	"time"
 
+	shopopsv1 "github.com/shopp-ops/shop-operator/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -23,8 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	shopopsv1 "github.com/shopp-ops/shop-operator/api/v1"
 )
 
 const (
@@ -101,7 +101,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	databaseURL, databaseCondition, err := r.reconcileDatabase(ctx, shop)
+	databaseURL, activeDB, databaseCondition, err := r.reconcileDatabase(ctx, shop)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile database")
 		return ctrl.Result{}, err
@@ -115,16 +115,20 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if databaseCondition.Status != metav1.ConditionTrue {
 		logger.Info("Database is not ready yet, skipping Deployment reconciliation", "reason", databaseCondition.Reason)
 
-		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition); err != nil {
+		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition, activeDB); err != nil {
 			logger.Error(err, "Failed to reconcile status")
 			return ctrl.Result{}, err
 		}
 
-		if databaseCondition.Reason == "DatabaseConnectionPending" {
+		switch databaseCondition.Reason {
+		case "DatabaseConnectionPending":
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		case "MigrationInProgress", "MigrationPending":
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		default:
+			return ctrl.Result{}, nil
 		}
 
-		return ctrl.Result{}, nil
 	}
 
 	apiDeployment, err := r.reconcileDeployment(ctx, shop, deploymentConfig{
@@ -166,7 +170,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, shop, apiDeployment, databaseCondition); err != nil {
+	if err := r.reconcileStatus(ctx, shop, apiDeployment, databaseCondition, activeDB); err != nil {
 		logger.Error(err, "Failed to reconcile status")
 		return ctrl.Result{}, err
 	}
@@ -183,6 +187,7 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&networkingv1.Ingress{}).
+		Owns(&batchv1.Job{}).
 		Named("shop").
 		Complete(r)
 }
@@ -223,6 +228,21 @@ func (r *ShopReconciler) reconcileAppSecretBase(ctx context.Context, shop *shopo
 		secret.Data["username"] = []byte("shop")
 		secret.Data["password"] = secret.Data["db-password"]
 
+		pgURL := fmt.Sprintf("postgresql://shop:%s@%s:5432/shop",
+			string(secret.Data["db-password"]),
+			r.databaseReadWriteServiceName(shop))
+		secret.Data["postgres-url"] = []byte(pgURL)
+
+		mongoURL, ready, err := r.mongoConnectionString(ctx, shop)
+		if err != nil {
+			return err
+		}
+		if ready {
+			secret.Data["mongo-url"] = []byte(mongoURL)
+		} else {
+			delete(secret.Data, "mongo-url")
+		}
+
 		return nil
 	})
 
@@ -250,7 +270,6 @@ func (r *ShopReconciler) reconcileAppSecretDatabaseURL(ctx context.Context, shop
 
 		secret.Type = corev1.SecretTypeOpaque
 		if databaseURL == "" {
-			delete(secret.Data, "database-url")
 			return nil
 		}
 
@@ -265,35 +284,155 @@ func (r *ShopReconciler) appSecretName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-app-secret", shop.Name)
 }
 
-func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
-	switch shop.Spec.Database.Type {
+func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, shopopsv1.DatabaseType, metav1.Condition, error) {
+	currentType := shop.Spec.Database.Type
+	recordedActiveType := shop.Status.ActiveDatabase
+	activeType := recordedActiveType
+	if activeType == "" {
+		activeType = currentType
+	}
+
+	activeURL, err := r.databaseURLFor(ctx, shop, activeType)
+	if err != nil {
+		return "", activeType, metav1.Condition{}, err
+	}
+
+	needsMigration := recordedActiveType != "" && recordedActiveType != currentType
+
+	switch currentType {
 	case shopopsv1.DatabaseStandard:
 		condition, err := r.reconcilePostgresDatabase(ctx, shop)
 		if err != nil || condition.Status != metav1.ConditionTrue {
-			return "", condition, err
+			return activeURL, activeType, condition, err
 		}
 
-		_ = r.deleteMongoDatabase(ctx, shop)
-		_ = r.deleteMongoRBAC(ctx, shop)
+		if needsMigration {
+			_, mongoCondition, err := r.reconcileMongoDatabase(ctx, shop)
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if mongoCondition.Status != metav1.ConditionTrue {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationPending",
+					Message:            "Waiting for source MongoDB to be ready before migration",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+			if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			urlsReady, err := r.migrationURLsReady(ctx, shop, "mongo", "postgres")
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if !urlsReady {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationPending",
+					Message:            "Waiting for migration connection URLs to be populated",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+
+			done, failureCondition, err := r.reconcileMigrationJob(ctx, shop, "mongo", "postgres")
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if failureCondition != nil {
+				return activeURL, activeType, *failureCondition, nil
+			}
+			if !done {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationInProgress",
+					Message:            "Migrating data from MongoDB to PostgreSQL",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+
+			if err := r.deleteMongoDatabase(ctx, shop); err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if err := r.deleteMongoRBAC(ctx, shop); err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+		}
 
 		url, err := r.postgresDatabaseURL(ctx, shop)
-		return url, condition, err
+		return url, shopopsv1.DatabaseStandard, condition, err
 
 	case shopopsv1.DatabaseLight:
-		url, condition, err := r.reconcileMongoDatabase(ctx, shop)
-		if err != nil || condition.Status != metav1.ConditionTrue {
-			return "", condition, err
+		_, mongoCondition, err := r.reconcileMongoDatabase(ctx, shop)
+		if err != nil || mongoCondition.Status != metav1.ConditionTrue {
+			return activeURL, activeType, mongoCondition, err
 		}
 
-		_ = r.deleteDatabaseCluster(ctx, shop)
-		return url, condition, nil
+		if needsMigration {
+			pgCondition, err := r.reconcilePostgresDatabase(ctx, shop)
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if pgCondition.Status != metav1.ConditionTrue {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationPending",
+					Message:            "Waiting for source PostgreSQL to be ready before migration",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+			if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			urlsReady, err := r.migrationURLsReady(ctx, shop, "postgres", "mongo")
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if !urlsReady {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationPending",
+					Message:            "Waiting for migration connection URLs to be populated",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+
+			done, failureCondition, err := r.reconcileMigrationJob(ctx, shop, "postgres", "mongo")
+			if err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+			if failureCondition != nil {
+				return activeURL, activeType, *failureCondition, nil
+			}
+			if !done {
+				return activeURL, activeType, metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationInProgress",
+					Message:            "Migrating data from PostgreSQL to MongoDB",
+					ObservedGeneration: shop.Generation,
+				}, nil
+			}
+
+			if err := r.deleteDatabaseCluster(ctx, shop); err != nil {
+				return activeURL, activeType, metav1.Condition{}, err
+			}
+		}
+
+		url, err := r.reconcileMongoDatabaseURL(ctx, shop)
+		return url, shopopsv1.DatabaseLight, mongoCondition, err
 
 	default:
-		return "", metav1.Condition{
+		return activeURL, activeType, metav1.Condition{
 			Type:               "DatabaseReady",
 			Status:             metav1.ConditionFalse,
 			Reason:             "UnsupportedDatabaseType",
-			Message:            fmt.Sprintf("Database type %q is not implemented yet", shop.Spec.Database.Type),
+			Message:            fmt.Sprintf("Database type %q is not implemented yet", currentType),
 			ObservedGeneration: shop.Generation,
 		}, nil
 	}
@@ -585,6 +724,86 @@ func (r *ShopReconciler) deleteMongoRBAC(ctx context.Context, shop *shopopsv1.Sh
 	return nil
 }
 
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+func (r *ShopReconciler) reconcileMigrationJob(ctx context.Context, shop *shopopsv1.Shop, from, to string) (bool, *metav1.Condition, error) {
+	jobName := r.migrationJobName(shop, from, to)
+
+	job := &batchv1.Job{}
+	err := r.Get(ctx, namespacedName(shop.Namespace, jobName), job)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return false, nil, err
+	}
+
+	if err == nil {
+		for _, condition := range job.Status.Conditions {
+			if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+				failureCondition := metav1.Condition{
+					Type:               "DatabaseReady",
+					Status:             metav1.ConditionFalse,
+					Reason:             "MigrationFailed",
+					Message:            fmt.Sprintf("Migration job %s failed: %s", jobName, condition.Message),
+					ObservedGeneration: shop.Generation,
+				}
+				return false, &failureCondition, nil
+			}
+		}
+		if job.Status.Succeeded > 0 {
+			return true, nil, nil
+		}
+		return false, nil, nil
+	}
+
+	backoffLimit := int32(3)
+	ttlSecondsAfterFinished := int32(3600)
+	jobLabels := r.migrationJobLabels(shop, from, to)
+	newJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: shop.Namespace,
+			Labels:    jobLabels,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: jobLabels,
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyOnFailure,
+					Containers: []corev1.Container{{
+						Name:    "migration",
+						Image:   shop.Spec.ApiImage,
+						Command: []string{"node", "dist/migration/migrate.js", "--from", from, "--to", to},
+						Env: []corev1.EnvVar{
+							{
+								Name: "POSTGRES_URL",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: r.appSecretName(shop)},
+									Key:                  "postgres-url",
+								}},
+							},
+							{
+								Name: "MONGO_URL",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: r.appSecretName(shop)},
+									Key:                  "mongo-url",
+								}},
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(shop, newJob, r.Scheme); err != nil {
+		return false, nil, err
+	}
+
+	return false, nil, r.Create(ctx, newJob)
+}
+
 func (r *ShopReconciler) reconcileDeployment(ctx context.Context, shop *shopopsv1.Shop, cfg deploymentConfig) (*appsv1.Deployment, error) {
 	replicas := r.desiredReplicas(shop)
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: cfg.name, Namespace: shop.Namespace}}
@@ -706,7 +925,7 @@ func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shopopsv1.S
 	return err
 }
 
-func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Shop, deployment *appsv1.Deployment, databaseCondition metav1.Condition) error {
+func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Shop, deployment *appsv1.Deployment, databaseCondition metav1.Condition, activeDB shopopsv1.DatabaseType) error {
 	latest := &shopopsv1.Shop{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(shop), latest); err != nil {
 		return err
@@ -736,6 +955,10 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 		}
 	}
 
+	if activeDB != "" {
+		latest.Status.ActiveDatabase = activeDB
+	}
+
 	latest.Status.Replicas = availableReplicas
 	latest.Status.URL = r.shopURL(shop)
 
@@ -745,7 +968,7 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 	switch {
 	case readyCondition.Status == metav1.ConditionTrue && databaseCondition.Status == metav1.ConditionTrue:
 		latest.Status.Phase = "Ready"
-	case databaseCondition.Status == metav1.ConditionFalse && (databaseCondition.Reason == "DatabaseCRDMissing" || databaseCondition.Reason == "UnsupportedDatabaseType"):
+	case databaseCondition.Status == metav1.ConditionFalse && (databaseCondition.Reason == "DatabaseCRDMissing" || databaseCondition.Reason == "UnsupportedDatabaseType" || databaseCondition.Reason == "MigrationFailed"):
 		latest.Status.Phase = "Degraded"
 	default:
 		latest.Status.Phase = "Progressing"
@@ -828,6 +1051,64 @@ func (r *ShopReconciler) walletAddress(shop *shopopsv1.Shop) string {
 	}
 
 	return "0x0000000000000000000000000000000000000000"
+}
+
+func (r *ShopReconciler) reconcileMongoDatabaseURL(ctx context.Context, shop *shopopsv1.Shop) (string, error) {
+	connectionString, ready, err := r.mongoConnectionString(ctx, shop)
+	if err != nil {
+		return "", err
+	}
+	if !ready {
+		return "", nil
+	}
+	return connectionString, nil
+}
+
+func (r *ShopReconciler) databaseURLFor(ctx context.Context, shop *shopopsv1.Shop, dbType shopopsv1.DatabaseType) (string, error) {
+	switch dbType {
+	case shopopsv1.DatabaseStandard:
+		return r.postgresDatabaseURL(ctx, shop)
+	case shopopsv1.DatabaseLight:
+		return r.reconcileMongoDatabaseURL(ctx, shop)
+	default:
+		return "", nil
+	}
+}
+
+func (r *ShopReconciler) migrationURLsReady(ctx context.Context, shop *shopopsv1.Shop, from, to string) (bool, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, namespacedName(shop.Namespace, r.appSecretName(shop)), secret); err != nil {
+		return false, err
+	}
+
+	requiredKeys := map[string]string{
+		"postgres": "postgres-url",
+		"mongo":    "mongo-url",
+	}
+
+	for _, driver := range []string{from, to} {
+		key, ok := requiredKeys[driver]
+		if !ok {
+			return false, fmt.Errorf("unsupported migration driver %q", driver)
+		}
+		if len(secret.Data[key]) == 0 {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+func (r *ShopReconciler) migrationJobName(shop *shopopsv1.Shop, from, to string) string {
+	return fmt.Sprintf("%s-migrate-%s-to-%s-gen-%d", shop.Name, from, to, shop.Generation)
+}
+
+func (r *ShopReconciler) migrationJobLabels(shop *shopopsv1.Shop, from, to string) map[string]string {
+	labels := r.labelsForShop(shop)
+	labels["shopops.shopops.dc.com/migration-from"] = from
+	labels["shopops.shopops.dc.com/migration-to"] = to
+	labels["shopops.shopops.dc.com/migration-generation"] = fmt.Sprintf("%d", shop.Generation)
+	return labels
 }
 
 func (r *ShopReconciler) ingressName(shop *shopopsv1.Shop) string {
