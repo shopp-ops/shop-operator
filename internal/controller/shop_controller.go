@@ -307,58 +307,27 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 		}
 
 		if needsMigration {
-			_, mongoCondition, err := r.reconcileMongoDatabase(ctx, shop)
+			completed, migrationCondition, err := r.reconcileDatabaseMigration(
+				ctx,
+				shop,
+				"mongo",
+				"postgres",
+				func(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
+					_, condition, err := r.reconcileMongoDatabase(ctx, shop)
+					return condition, err
+				},
+				func(ctx context.Context, shop *shopopsv1.Shop) error {
+					if err := r.deleteMongoDatabase(ctx, shop); err != nil {
+						return err
+					}
+					return r.deleteMongoRBAC(ctx, shop)
+				},
+			)
 			if err != nil {
 				return activeURL, activeType, metav1.Condition{}, err
 			}
-			if mongoCondition.Status != metav1.ConditionTrue {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationPending",
-					Message:            "Waiting for source MongoDB to be ready before migration",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-			if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			urlsReady, err := r.migrationURLsReady(ctx, shop, "mongo", "postgres")
-			if err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			if !urlsReady {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationPending",
-					Message:            "Waiting for migration connection URLs to be populated",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-
-			done, failureCondition, err := r.reconcileMigrationJob(ctx, shop, "mongo", "postgres")
-			if err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			if failureCondition != nil {
-				return activeURL, activeType, *failureCondition, nil
-			}
-			if !done {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationInProgress",
-					Message:            "Migrating data from MongoDB to PostgreSQL",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-
-			if err := r.deleteMongoDatabase(ctx, shop); err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			if err := r.deleteMongoRBAC(ctx, shop); err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
+			if !completed {
+				return activeURL, activeType, migrationCondition, nil
 			}
 		}
 
@@ -366,66 +335,34 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 		return url, shopopsv1.DatabaseStandard, condition, err
 
 	case shopopsv1.DatabaseLight:
-		_, mongoCondition, err := r.reconcileMongoDatabase(ctx, shop)
-		if err != nil || mongoCondition.Status != metav1.ConditionTrue {
-			return activeURL, activeType, mongoCondition, err
+		_, condition, err := r.reconcileMongoDatabase(ctx, shop)
+		if err != nil || condition.Status != metav1.ConditionTrue {
+			return activeURL, activeType, condition, err
 		}
 
 		if needsMigration {
-			pgCondition, err := r.reconcilePostgresDatabase(ctx, shop)
+			completed, migrationCondition, err := r.reconcileDatabaseMigration(
+				ctx,
+				shop,
+				"postgres",
+				"mongo",
+				func(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
+					return r.reconcilePostgresDatabase(ctx, shop)
+				},
+				func(ctx context.Context, shop *shopopsv1.Shop) error {
+					return r.deleteDatabaseCluster(ctx, shop)
+				},
+			)
 			if err != nil {
 				return activeURL, activeType, metav1.Condition{}, err
 			}
-			if pgCondition.Status != metav1.ConditionTrue {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationPending",
-					Message:            "Waiting for source PostgreSQL to be ready before migration",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-			if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			urlsReady, err := r.migrationURLsReady(ctx, shop, "postgres", "mongo")
-			if err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			if !urlsReady {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationPending",
-					Message:            "Waiting for migration connection URLs to be populated",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-
-			done, failureCondition, err := r.reconcileMigrationJob(ctx, shop, "postgres", "mongo")
-			if err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
-			}
-			if failureCondition != nil {
-				return activeURL, activeType, *failureCondition, nil
-			}
-			if !done {
-				return activeURL, activeType, metav1.Condition{
-					Type:               "DatabaseReady",
-					Status:             metav1.ConditionFalse,
-					Reason:             "MigrationInProgress",
-					Message:            "Migrating data from PostgreSQL to MongoDB",
-					ObservedGeneration: shop.Generation,
-				}, nil
-			}
-
-			if err := r.deleteDatabaseCluster(ctx, shop); err != nil {
-				return activeURL, activeType, metav1.Condition{}, err
+			if !completed {
+				return activeURL, activeType, migrationCondition, nil
 			}
 		}
 
 		url, err := r.reconcileMongoDatabaseURL(ctx, shop)
-		return url, shopopsv1.DatabaseLight, mongoCondition, err
+		return url, shopopsv1.DatabaseLight, condition, err
 
 	default:
 		return activeURL, activeType, metav1.Condition{
@@ -435,6 +372,72 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 			Message:            fmt.Sprintf("Database type %q is not implemented yet", currentType),
 			ObservedGeneration: shop.Generation,
 		}, nil
+	}
+}
+
+func (r *ShopReconciler) reconcileDatabaseMigration(
+	ctx context.Context,
+	shop *shopopsv1.Shop,
+	from string,
+	to string,
+	ensureSource func(context.Context, *shopopsv1.Shop) (metav1.Condition, error),
+	cleanup func(context.Context, *shopopsv1.Shop) error,
+) (bool, metav1.Condition, error) {
+	sourceCondition, err := ensureSource(ctx, shop)
+	if err != nil {
+		return false, metav1.Condition{}, err
+	}
+	if sourceCondition.Status != metav1.ConditionTrue {
+		return false, r.databasePendingCondition(shop, "Waiting for source MongoDB to be ready before migration"), nil
+	}
+
+	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
+		return false, metav1.Condition{}, err
+	}
+
+	urlsReady, err := r.migrationURLsReady(ctx, shop, from, to)
+	if err != nil {
+		return false, metav1.Condition{}, err
+	}
+	if !urlsReady {
+		return false, r.databasePendingCondition(shop, "Waiting for migration connection URLs to be populated"), nil
+	}
+
+	done, failureCondition, err := r.reconcileMigrationJob(ctx, shop, from, to)
+	if err != nil {
+		return false, metav1.Condition{}, err
+	}
+	if failureCondition != nil {
+		return false, *failureCondition, nil
+	}
+	if !done {
+		return false, r.databaseInProgressCondition(shop, "Migrating data from MongoDB to PostgreSQL"), nil
+	}
+
+	if err := cleanup(ctx, shop); err != nil {
+		return false, metav1.Condition{}, err
+	}
+
+	return true, metav1.Condition{}, nil
+}
+
+func (r *ShopReconciler) databasePendingCondition(shop *shopopsv1.Shop, message string) metav1.Condition {
+	return metav1.Condition{
+		Type:               "DatabaseReady",
+		Status:             metav1.ConditionFalse,
+		Reason:             "MigrationPending",
+		Message:            message,
+		ObservedGeneration: shop.Generation,
+	}
+}
+
+func (r *ShopReconciler) databaseInProgressCondition(shop *shopopsv1.Shop, message string) metav1.Condition {
+	return metav1.Condition{
+		Type:               "DatabaseReady",
+		Status:             metav1.ConditionFalse,
+		Reason:             "MigrationInProgress",
+		Message:            message,
+		ObservedGeneration: shop.Generation,
 	}
 }
 
