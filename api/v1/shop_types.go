@@ -31,7 +31,7 @@ type DatabaseType string
 
 const (
 	DatabaseStandard DatabaseType = "standard" // PostgreSQL via CNPG operator
-	DatabaseLight    DatabaseType = "light"    // Redis via REDB operator
+	DatabaseLight    DatabaseType = "light"    // MongoDB via MongoDB Community Operator
 )
 
 type ShopDatabase struct {

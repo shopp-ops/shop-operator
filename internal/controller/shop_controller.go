@@ -3,11 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"reflect"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,13 +31,27 @@ const (
 	apiContainerPort int32 = 3000
 	webContainerPort int32 = 3000
 	servicePort      int32 = 80
+
+	mongoAppDatabase      = "shop"
+	mongoAuthDB           = "admin"
+	mongoUsername         = "shop"
+	mongoDatabaseSAName   = "mongodb-database"
+	mongoDatabaseRoleName = "mongodb-database"
+	mongoDatabaseRBName   = "mongodb-database"
 )
 
-var cnpgClusterGVK = schema.GroupVersionKind{
-	Group:   "postgresql.cnpg.io",
-	Version: "v1",
-	Kind:    "Cluster",
-}
+var (
+	cnpgClusterGVK = schema.GroupVersionKind{
+		Group:   "postgresql.cnpg.io",
+		Version: "v1",
+		Kind:    "Cluster",
+	}
+	mongoDBCommunityGVK = schema.GroupVersionKind{
+		Group:   "mongodbcommunity.mongodb.com",
+		Version: "v1",
+		Kind:    "MongoDBCommunity",
+	}
+)
 
 type deploymentConfig struct {
 	name      string
@@ -62,8 +79,11 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -76,15 +96,35 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if err := r.reconcileAppSecret(ctx, shop); err != nil {
+	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
 		logger.Error(err, "Failed to reconcile Secret")
 		return ctrl.Result{}, err
 	}
 
-	databaseCondition, err := r.reconcileDatabase(ctx, shop)
+	databaseURL, databaseCondition, err := r.reconcileDatabase(ctx, shop)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile database")
 		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileAppSecretDatabaseURL(ctx, shop, databaseURL); err != nil {
+		logger.Error(err, "Failed to update database URL in Secret")
+		return ctrl.Result{}, err
+	}
+
+	if databaseCondition.Status != metav1.ConditionTrue {
+		logger.Info("Database is not ready yet, skipping Deployment reconciliation", "reason", databaseCondition.Reason)
+
+		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition); err != nil {
+			logger.Error(err, "Failed to reconcile status")
+			return ctrl.Result{}, err
+		}
+
+		if databaseCondition.Reason == "DatabaseConnectionPending" {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
+		return ctrl.Result{}, nil
 	}
 
 	apiDeployment, err := r.reconcileDeployment(ctx, shop, deploymentConfig{
@@ -147,7 +187,7 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *ShopReconciler) reconcileAppSecret(ctx context.Context, shop *shopopsv1.Shop) error {
+func (r *ShopReconciler) reconcileAppSecretBase(ctx context.Context, shop *shopopsv1.Shop) error {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: r.appSecretName(shop), Namespace: shop.Namespace}}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
@@ -180,16 +220,41 @@ func (r *ShopReconciler) reconcileAppSecret(ctx context.Context, shop *shopopsv1
 		}
 
 		secret.Type = corev1.SecretTypeOpaque
-		secret.Data["database-url"] = []byte(fmt.Sprintf(
-			"postgresql://shop:%s@%s:5432/shop",
-			string(secret.Data["db-password"]),
-			r.databaseReadWriteServiceName(shop),
-		))
-
 		secret.Data["username"] = []byte("shop")
 		secret.Data["password"] = secret.Data["db-password"]
-		secret.Data["wallet-address"] = []byte(r.walletAddress(shop))
 
+		return nil
+	})
+
+	return err
+}
+
+func (r *ShopReconciler) reconcileAppSecretDatabaseURL(ctx context.Context, shop *shopopsv1.Shop, databaseURL string) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: r.appSecretName(shop), Namespace: shop.Namespace}}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		if err := controllerutil.SetControllerReference(shop, secret, r.Scheme); err != nil {
+			return err
+		}
+
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		for key, value := range r.labelsForShop(shop) {
+			secret.Labels[key] = value
+		}
+
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		secret.Type = corev1.SecretTypeOpaque
+		if databaseURL == "" {
+			delete(secret.Data, "database-url")
+			return nil
+		}
+
+		secret.Data["database-url"] = []byte(databaseURL)
 		return nil
 	})
 
@@ -200,13 +265,31 @@ func (r *ShopReconciler) appSecretName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-app-secret", shop.Name)
 }
 
-func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
-	if shop.Spec.Database.Type != shopopsv1.DatabaseStandard {
-		if err := r.deleteDatabaseCluster(ctx, shop); err != nil {
-			return metav1.Condition{}, err
+func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
+	switch shop.Spec.Database.Type {
+	case shopopsv1.DatabaseStandard:
+		condition, err := r.reconcilePostgresDatabase(ctx, shop)
+		if err != nil || condition.Status != metav1.ConditionTrue {
+			return "", condition, err
 		}
 
-		return metav1.Condition{
+		_ = r.deleteMongoDatabase(ctx, shop)
+		_ = r.deleteMongoRBAC(ctx, shop)
+
+		url, err := r.postgresDatabaseURL(ctx, shop)
+		return url, condition, err
+
+	case shopopsv1.DatabaseLight:
+		url, condition, err := r.reconcileMongoDatabase(ctx, shop)
+		if err != nil || condition.Status != metav1.ConditionTrue {
+			return "", condition, err
+		}
+
+		_ = r.deleteDatabaseCluster(ctx, shop)
+		return url, condition, nil
+
+	default:
+		return "", metav1.Condition{
 			Type:               "DatabaseReady",
 			Status:             metav1.ConditionFalse,
 			Reason:             "UnsupportedDatabaseType",
@@ -214,7 +297,9 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 			ObservedGeneration: shop.Generation,
 		}, nil
 	}
+}
 
+func (r *ShopReconciler) reconcilePostgresDatabase(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
 	cluster := r.desiredDatabaseCluster(shop)
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cluster, func() error {
 		if err := controllerutil.SetControllerReference(shop, cluster, r.Scheme); err != nil {
@@ -265,9 +350,139 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 		Type:               "DatabaseReady",
 		Status:             metav1.ConditionTrue,
 		Reason:             "Reconciled",
-		Message:            "Database Cluster is reconciled",
+		Message:            "PostgreSQL Cluster is reconciled",
 		ObservedGeneration: shop.Generation,
 	}, nil
+}
+
+func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
+	if err := r.reconcileMongoRBAC(ctx, shop); err != nil {
+		return "", metav1.Condition{}, err
+	}
+
+	mongo := r.desiredMongoDatabase(shop)
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, mongo, func() error {
+		if err := controllerutil.SetControllerReference(shop, mongo, r.Scheme); err != nil {
+			return err
+		}
+
+		existingLabels := mongo.GetLabels()
+		if existingLabels == nil {
+			existingLabels = map[string]string{}
+		}
+		for k, v := range r.labelsForShop(shop) {
+			existingLabels[k] = v
+		}
+		mongo.SetLabels(existingLabels)
+
+		mongo.Object["spec"] = map[string]any{
+			"members": 1,
+			"type":    "ReplicaSet",
+			"version": "6.0.5",
+			"security": map[string]any{
+				"authentication": map[string]any{
+					"modes": []any{"SCRAM"},
+				},
+			},
+			"users": []any{
+				map[string]any{
+					"name":                       mongoUsername,
+					"db":                         mongoAuthDB,
+					"passwordSecretRef":          map[string]any{"name": r.appSecretName(shop)},
+					"connectionStringSecretName": r.mongoConnectionSecretName(shop),
+					"roles": []any{
+						map[string]any{"name": "readWrite", "db": mongoAppDatabase},
+					},
+					"scramCredentialsSecretName": r.mongoSCRAMSecretName(shop),
+				},
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return "", metav1.Condition{
+				Type:               "DatabaseReady",
+				Status:             metav1.ConditionFalse,
+				Reason:             "DatabaseCRDMissing",
+				Message:            "MongoDBCommunity CRD is not installed in the target cluster",
+				ObservedGeneration: shop.Generation,
+			}, nil
+		}
+
+		return "", metav1.Condition{}, err
+	}
+
+	connectionString, ready, err := r.mongoConnectionString(ctx, shop)
+	if err != nil {
+		return "", metav1.Condition{}, err
+	}
+	if !ready {
+		return "", metav1.Condition{
+			Type:               "DatabaseReady",
+			Status:             metav1.ConditionFalse,
+			Reason:             "DatabaseConnectionPending",
+			Message:            fmt.Sprintf("Waiting for MongoDB connection secret %q or %q", r.mongoConnectionSecretName(shop), r.mongoDefaultConnectionSecretName(shop)),
+			ObservedGeneration: shop.Generation,
+		}, nil
+	}
+
+	return connectionString, metav1.Condition{
+		Type:               "DatabaseReady",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Reconciled",
+		Message:            "MongoDB resource is reconciled",
+		ObservedGeneration: shop.Generation,
+	}, nil
+}
+
+func (r *ShopReconciler) mongoConnectionString(ctx context.Context, shop *shopopsv1.Shop) (string, bool, error) {
+	for _, secretName := range []string{r.mongoConnectionSecretName(shop), r.mongoDefaultConnectionSecretName(shop)} {
+		secret := &corev1.Secret{}
+		err := r.Get(ctx, namespacedName(shop.Namespace, secretName), secret)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return "", false, err
+		}
+
+		for _, key := range []string{"connectionString.standard", "connectionString.standardSrv"} {
+			if value, ok := secret.Data[key]; ok && len(value) > 0 {
+
+				connectionString := string(value)
+
+				u, err := url.Parse(connectionString)
+				if err != nil {
+					return "", false, err
+				}
+
+				u.Path = "/" + mongoAppDatabase
+
+				q := u.Query()
+				q.Set("authSource", mongoAuthDB)
+				u.RawQuery = q.Encode()
+
+				return u.String(), true, nil
+			}
+		}
+	}
+
+	return "", false, nil
+}
+
+func (r *ShopReconciler) postgresDatabaseURL(ctx context.Context, shop *shopopsv1.Shop) (string, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, namespacedName(shop.Namespace, r.appSecretName(shop)), secret); err != nil {
+		return "", err
+	}
+
+	password := secret.Data["db-password"]
+	if len(password) == 0 {
+		password = secret.Data["password"]
+	}
+
+	return fmt.Sprintf("postgresql://shop:%s@%s:5432/shop", string(password), r.databaseReadWriteServiceName(shop)), nil
 }
 
 func (r *ShopReconciler) deleteDatabaseCluster(ctx context.Context, shop *shopopsv1.Shop) error {
@@ -277,6 +492,94 @@ func (r *ShopReconciler) deleteDatabaseCluster(ctx context.Context, shop *shopop
 			return nil
 		}
 		return err
+	}
+
+	return nil
+}
+
+func (r *ShopReconciler) deleteMongoDatabase(ctx context.Context, shop *shopopsv1.Shop) error {
+	mongo := r.desiredMongoDatabase(shop)
+	if err := r.Delete(ctx, mongo); err != nil {
+		if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) {
+			return nil
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (r *ShopReconciler) reconcileMongoRBAC(ctx context.Context, shop *shopopsv1.Shop) error {
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseSAName, Namespace: shop.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
+		if err := controllerutil.SetControllerReference(shop, serviceAccount, r.Scheme); err != nil {
+			return err
+		}
+		serviceAccount.Labels = r.labelsForShop(shop)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseRoleName, Namespace: shop.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+		if err := controllerutil.SetControllerReference(shop, role, r.Scheme); err != nil {
+			return err
+		}
+		role.Labels = r.labelsForShop(shop)
+		role.Rules = []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"patch", "delete", "get"},
+			},
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	roleBinding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseRBName, Namespace: shop.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, roleBinding, func() error {
+		if err := controllerutil.SetControllerReference(shop, roleBinding, r.Scheme); err != nil {
+			return err
+		}
+		roleBinding.Labels = r.labelsForShop(shop)
+		roleBinding.RoleRef = rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     mongoDatabaseRoleName,
+		}
+		roleBinding.Subjects = []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      mongoDatabaseSAName,
+			Namespace: shop.Namespace,
+		}}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *ShopReconciler) deleteMongoRBAC(ctx context.Context, shop *shopopsv1.Shop) error {
+	for _, obj := range []client.Object{
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseRBName, Namespace: shop.Namespace}},
+		&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseRoleName, Namespace: shop.Namespace}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: mongoDatabaseSAName, Namespace: shop.Namespace}},
+	} {
+		if err := r.Delete(ctx, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
 	}
 
 	return nil
@@ -411,10 +714,7 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 
 	originalStatus := latest.Status.DeepCopy()
 	desiredReplicas := r.desiredReplicas(shop)
-	availableReplicas := deployment.Status.AvailableReplicas
-
-	latest.Status.Replicas = availableReplicas
-	latest.Status.URL = r.shopURL(shop)
+	availableReplicas := int32(0)
 
 	readyCondition := metav1.Condition{
 		Type:               "Available",
@@ -423,11 +723,21 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 		Message:            fmt.Sprintf("Waiting for %d replicas to become available", desiredReplicas),
 		ObservedGeneration: latest.Generation,
 	}
-	if availableReplicas >= desiredReplicas {
-		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = "Available"
-		readyCondition.Message = "Deployment is available"
+
+	if deployment == nil {
+		readyCondition.Reason = "WaitingForDatabase"
+		readyCondition.Message = "Waiting for database to become ready before reconciling Deployments"
+	} else {
+		availableReplicas = deployment.Status.AvailableReplicas
+		if availableReplicas >= desiredReplicas {
+			readyCondition.Status = metav1.ConditionTrue
+			readyCondition.Reason = "Available"
+			readyCondition.Message = "Deployment is available"
+		}
 	}
+
+	latest.Status.Replicas = availableReplicas
+	latest.Status.URL = r.shopURL(shop)
 
 	apimeta.SetStatusCondition(&latest.Status.Conditions, readyCondition)
 	apimeta.SetStatusCondition(&latest.Status.Conditions, databaseCondition)
@@ -456,6 +766,14 @@ func (r *ShopReconciler) desiredDatabaseCluster(shop *shopopsv1.Shop) *unstructu
 	return cluster
 }
 
+func (r *ShopReconciler) desiredMongoDatabase(shop *shopopsv1.Shop) *unstructured.Unstructured {
+	mongo := &unstructured.Unstructured{}
+	mongo.SetGroupVersionKind(mongoDBCommunityGVK)
+	mongo.SetName(r.databaseClusterName(shop))
+	mongo.SetNamespace(shop.Namespace)
+	return mongo
+}
+
 func (r *ShopReconciler) desiredReplicas(shop *shopopsv1.Shop) int32 {
 	if shop.Spec.Availability == shopopsv1.AvailabilityHigh {
 		return 3
@@ -481,8 +799,9 @@ func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop) []corev1.EnvVar {
 		{Name: "ADMIN_EMAIL", ValueFrom: secretRef("admin-email")},
 		{Name: "ADMIN_PASSWORD", ValueFrom: secretRef("admin-password")},
 		{Name: "JWT_SECRET", ValueFrom: secretRef("jwt-secret")},
-		{Name: "WALLET_ADDRESS", ValueFrom: secretRef("wallet-address")},
+		{Name: "WALLET_ADDRESS", Value: r.walletAddress(shop)},
 		{Name: "SHOP_NAME", Value: r.displayName(shop)},
+		{Name: "DB_MODE", Value: string(shop.Spec.Database.Type)},
 	}
 }
 
@@ -511,14 +830,6 @@ func (r *ShopReconciler) walletAddress(shop *shopopsv1.Shop) string {
 	return "0x0000000000000000000000000000000000000000"
 }
 
-func (r *ShopReconciler) discordChannel(shop *shopopsv1.Shop) string {
-	if shop.Spec.DiscordChannelRef != "" {
-		return shop.Spec.DiscordChannelRef
-	}
-
-	return "shop-alerts"
-}
-
 func (r *ShopReconciler) ingressName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-ingress", shop.Name)
 }
@@ -529,6 +840,18 @@ func (r *ShopReconciler) databaseClusterName(shop *shopopsv1.Shop) string {
 
 func (r *ShopReconciler) databaseReadWriteServiceName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-rw", r.databaseClusterName(shop))
+}
+
+func (r *ShopReconciler) mongoConnectionSecretName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-mongo-connection", shop.Name)
+}
+
+func (r *ShopReconciler) mongoDefaultConnectionSecretName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-%s-%s", r.databaseClusterName(shop), mongoAuthDB, mongoUsername)
+}
+
+func (r *ShopReconciler) mongoSCRAMSecretName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-mongo-scram", shop.Name)
 }
 
 func (r *ShopReconciler) shopURL(shop *shopopsv1.Shop) string {
