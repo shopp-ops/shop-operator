@@ -391,10 +391,6 @@ func (r *ShopReconciler) reconcileDatabaseMigration(
 		return false, r.databasePendingCondition(shop, "Waiting for source MongoDB to be ready before migration"), nil
 	}
 
-	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
-		return false, metav1.Condition{}, err
-	}
-
 	urlsReady, err := r.migrationURLsReady(ctx, shop, from, to)
 	if err != nil {
 		return false, metav1.Condition{}, err
