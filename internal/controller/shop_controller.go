@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/url"
 	"reflect"
 	"time"
@@ -203,16 +204,14 @@ func (r *ShopReconciler) reconcileAppSecretBase(ctx context.Context, shop *shopo
 		if secret.Labels == nil {
 			secret.Labels = map[string]string{}
 		}
-		for key, value := range r.labelsForShop(shop) {
-			secret.Labels[key] = value
-		}
+		maps.Copy(secret.Labels, r.labelsForShop(shop))
 
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
 		}
 
 		if len(secret.Data["db-password"]) == 0 {
-			secret.Data["db-password"] = []byte(fmt.Sprintf("%s-password", shop.Name))
+			secret.Data["db-password"] = []byte(shop.Name + "-password")
 		}
 		if len(secret.Data["admin-password"]) == 0 {
 			secret.Data["admin-password"] = []byte("changeme")
@@ -260,9 +259,7 @@ func (r *ShopReconciler) reconcileAppSecretDatabaseURL(ctx context.Context, shop
 		if secret.Labels == nil {
 			secret.Labels = map[string]string{}
 		}
-		for key, value := range r.labelsForShop(shop) {
-			secret.Labels[key] = value
-		}
+		maps.Copy(secret.Labels, r.labelsForShop(shop))
 
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
@@ -312,8 +309,10 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 				shop,
 				"mongo",
 				"postgres",
+				"Waiting for source MongoDB to be ready before migration",
+				"Migrating data from MongoDB to PostgreSQL",
 				func(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
-					_, condition, err := r.reconcileMongoDatabase(ctx, shop)
+					condition, err := r.reconcileMongoDatabase(ctx, shop)
 					return condition, err
 				},
 				func(ctx context.Context, shop *shopopsv1.Shop) error {
@@ -331,11 +330,11 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 			}
 		}
 
-		url, err := r.postgresDatabaseURL(ctx, shop)
-		return url, shopopsv1.DatabaseStandard, condition, err
+		postgresDatabaseURL, err := r.postgresDatabaseURL(ctx, shop)
+		return postgresDatabaseURL, shopopsv1.DatabaseStandard, condition, err
 
 	case shopopsv1.DatabaseLight:
-		_, condition, err := r.reconcileMongoDatabase(ctx, shop)
+		condition, err := r.reconcileMongoDatabase(ctx, shop)
 		if err != nil || condition.Status != metav1.ConditionTrue {
 			return activeURL, activeType, condition, err
 		}
@@ -346,6 +345,8 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 				shop,
 				"postgres",
 				"mongo",
+				"Waiting for source PostgreSQL to be ready before migration",
+				"Migrating data from PostgreSQL to MongoDB",
 				func(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
 					return r.reconcilePostgresDatabase(ctx, shop)
 				},
@@ -361,8 +362,8 @@ func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.
 			}
 		}
 
-		url, err := r.reconcileMongoDatabaseURL(ctx, shop)
-		return url, shopopsv1.DatabaseLight, condition, err
+		mongoDatabaseURL, err := r.reconcileMongoDatabaseURL(ctx, shop)
+		return mongoDatabaseURL, shopopsv1.DatabaseLight, condition, err
 
 	default:
 		return activeURL, activeType, metav1.Condition{
@@ -380,6 +381,8 @@ func (r *ShopReconciler) reconcileDatabaseMigration(
 	shop *shopopsv1.Shop,
 	from string,
 	to string,
+	sourcePendingMessage string,
+	inProgressMessage string,
 	ensureSource func(context.Context, *shopopsv1.Shop) (metav1.Condition, error),
 	cleanup func(context.Context, *shopopsv1.Shop) error,
 ) (bool, metav1.Condition, error) {
@@ -388,7 +391,11 @@ func (r *ShopReconciler) reconcileDatabaseMigration(
 		return false, metav1.Condition{}, err
 	}
 	if sourceCondition.Status != metav1.ConditionTrue {
-		return false, r.databasePendingCondition(shop, "Waiting for source MongoDB to be ready before migration"), nil
+		return false, r.databasePendingCondition(shop, sourcePendingMessage), nil
+	}
+
+	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
+		return false, metav1.Condition{}, err
 	}
 
 	urlsReady, err := r.migrationURLsReady(ctx, shop, from, to)
@@ -407,7 +414,7 @@ func (r *ShopReconciler) reconcileDatabaseMigration(
 		return false, *failureCondition, nil
 	}
 	if !done {
-		return false, r.databaseInProgressCondition(shop, "Migrating data from MongoDB to PostgreSQL"), nil
+		return false, r.databaseInProgressCondition(shop, inProgressMessage), nil
 	}
 
 	if err := cleanup(ctx, shop); err != nil {
@@ -448,9 +455,7 @@ func (r *ShopReconciler) reconcilePostgresDatabase(ctx context.Context, shop *sh
 		if existingLabels == nil {
 			existingLabels = map[string]string{}
 		}
-		for k, v := range r.labelsForShop(shop) {
-			existingLabels[k] = v
-		}
+		maps.Copy(existingLabels, r.labelsForShop(shop))
 		cluster.SetLabels(existingLabels)
 
 		cluster.Object["spec"] = map[string]any{
@@ -493,9 +498,9 @@ func (r *ShopReconciler) reconcilePostgresDatabase(ctx context.Context, shop *sh
 	}, nil
 }
 
-func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
+func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopopsv1.Shop) (metav1.Condition, error) {
 	if err := r.reconcileMongoRBAC(ctx, shop); err != nil {
-		return "", metav1.Condition{}, err
+		return metav1.Condition{}, err
 	}
 
 	mongo := r.desiredMongoDatabase(shop)
@@ -508,9 +513,7 @@ func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopo
 		if existingLabels == nil {
 			existingLabels = map[string]string{}
 		}
-		for k, v := range r.labelsForShop(shop) {
-			existingLabels[k] = v
-		}
+		maps.Copy(existingLabels, r.labelsForShop(shop))
 		mongo.SetLabels(existingLabels)
 
 		mongo.Object["spec"] = map[string]any{
@@ -539,7 +542,7 @@ func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopo
 	})
 	if err != nil {
 		if apimeta.IsNoMatchError(err) {
-			return "", metav1.Condition{
+			return metav1.Condition{
 				Type:               "DatabaseReady",
 				Status:             metav1.ConditionFalse,
 				Reason:             "DatabaseCRDMissing",
@@ -548,15 +551,15 @@ func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopo
 			}, nil
 		}
 
-		return "", metav1.Condition{}, err
+		return metav1.Condition{}, err
 	}
 
-	connectionString, ready, err := r.mongoConnectionString(ctx, shop)
+	_, ready, err := r.mongoConnectionString(ctx, shop)
 	if err != nil {
-		return "", metav1.Condition{}, err
+		return metav1.Condition{}, err
 	}
 	if !ready {
-		return "", metav1.Condition{
+		return metav1.Condition{
 			Type:               "DatabaseReady",
 			Status:             metav1.ConditionFalse,
 			Reason:             "DatabaseConnectionPending",
@@ -565,7 +568,7 @@ func (r *ShopReconciler) reconcileMongoDatabase(ctx context.Context, shop *shopo
 		}, nil
 	}
 
-	return connectionString, metav1.Condition{
+	return metav1.Condition{
 		Type:               "DatabaseReady",
 		Status:             metav1.ConditionTrue,
 		Reason:             "Reconciled",
@@ -815,7 +818,7 @@ func (r *ShopReconciler) reconcileDeployment(ctx context.Context, shop *shopopsv
 		deployment.Labels = cfg.labels
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: cfg.selectors}
-		deployment.Spec.Template.ObjectMeta.Labels = cfg.selectors
+		deployment.Spec.Template.Labels = cfg.selectors
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{{
 			Name:            cfg.name,
 			Image:           cfg.image,
