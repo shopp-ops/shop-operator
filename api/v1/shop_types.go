@@ -20,47 +20,83 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+type AvailabilityMode string
 
-// ShopSpec defines the desired state of Shop
-type ShopSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+const (
+	AvailabilityStandard AvailabilityMode = "standard" // 2 replicas
+	AvailabilityHigh     AvailabilityMode = "high"     // 3 replicas
+)
 
-	// foo is an example field of Shop. Edit shop_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+type DatabaseType string
+
+const (
+	DatabaseStandard DatabaseType = "standard" // PostgreSQL via CNPG operator
+	DatabaseLight    DatabaseType = "light"    // MongoDB via MongoDB Community Operator
+)
+
+type ShopDatabase struct {
+	// +kubebuilder:validation:Enum=standard;light
+	Type DatabaseType `json:"type"`
 }
 
-// ShopStatus defines the observed state of Shop.
+type ShopSpec struct {
+	// Display name of the shop.
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Enum=standard;high
+	Availability AvailabilityMode `json:"availability"`
+
+	// Ethereum-compatible wallet address for receiving payments.
+	// +optional
+	WalletAddress string `json:"walletAddress,omitempty"`
+
+	// Database configuration.
+	Database ShopDatabase `json:"database"`
+
+	// Docker image for the shop backend application.
+	ApiImage string `json:"apiImage"`
+
+	// Docker image for the shop frontend application.
+	WebImage string `json:"webImage"`
+
+	// Ingress hostname for the shop (e.g. myshop.example.com).
+	// +optional
+	Host string `json:"host,omitempty"`
+
+	// Name of the DiscordChannel CR to use for alerts.
+	// +optional
+	DiscordChannelRef string `json:"discordChannelRef,omitempty"`
+}
+
 type ShopStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Lifecycle phase of the Shop.
+	// +optional
+	Phase string `json:"phase,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// Number of available replicas.
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
 
-	// conditions represent the current state of the Shop resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Public URL of the shop (derived from spec.host).
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// +optional
 	// +listType=map
 	// +listMapKey=type
-	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	ActiveDatabase DatabaseType `json:"activeDatabase,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
+// +kubebuilder:resource:scope=Namespaced,shortName=sh
+// +kubebuilder:printcolumn:name="Availability",type=string,JSONPath=`.spec.availability`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
+// +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // Shop is the Schema for the shops API
 type Shop struct {
 	metav1.TypeMeta `json:",inline"`
