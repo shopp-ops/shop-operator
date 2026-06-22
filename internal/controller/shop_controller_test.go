@@ -26,6 +26,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	shopopsv1 "github.com/shopp-ops/shop-operator/api/v1"
@@ -35,6 +36,7 @@ var _ = Describe("Shop Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
+		var adminEmail string
 		ctx := context.Background()
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
@@ -42,15 +44,24 @@ var _ = Describe("Shop Controller", func() {
 		}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind Shop")
-			resource := &shopopsv1.Shop{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			if err == nil {
-				return
-			}
-			Expect(errors.IsNotFound(err)).To(BeTrue())
+			adminEmail = ""
+		})
 
-			resource = &shopopsv1.Shop{
+		JustBeforeEach(func() {
+			By("creating the custom resource for the Kind Shop")
+
+			for _, obj := range []client.Object{
+				&shopopsv1.Shop{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "test-resource-app-secret", Namespace: "default"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "test-resource-admin-credentials", Namespace: "default"}},
+			} {
+				err := k8sClient.Delete(ctx, obj)
+				if err != nil && !errors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+			}
+
+			resource := &shopopsv1.Shop{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
@@ -62,6 +73,7 @@ var _ = Describe("Shop Controller", func() {
 					ApiImage:          "nginx:latest",
 					WebImage:          "nginx:latest",
 					Host:              "test-shop.example.com",
+					AdminEmail:        adminEmail,
 					DiscordChannelRef: "shop-alerts",
 					Database: shopopsv1.ShopDatabase{
 						Type: shopopsv1.DatabaseStandard,
@@ -72,15 +84,17 @@ var _ = Describe("Shop Controller", func() {
 		})
 
 		AfterEach(func() {
-			resource := &shopopsv1.Shop{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			if errors.IsNotFound(err) {
-				return
-			}
-			Expect(err).NotTo(HaveOccurred())
-
 			By("cleaning up the specific resource instance Shop")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			for _, obj := range []client.Object{
+				&shopopsv1.Shop{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "test-resource-app-secret", Namespace: "default"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "test-resource-admin-credentials", Namespace: "default"}},
+			} {
+				err := k8sClient.Delete(ctx, obj)
+				if err != nil && !errors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+			}
 		})
 
 		It("should gracefully report missing database CRDs in envtest", func() {
@@ -97,10 +111,15 @@ var _ = Describe("Shop Controller", func() {
 			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-app-secret"), secret)).To(Succeed())
 			Expect(secret.Data).To(HaveKeyWithValue("username", []byte("shop")))
 			Expect(secret.Data).To(HaveKeyWithValue("password", []byte("test-resource-password")))
-			Expect(secret.Data).To(HaveKey("admin-email"))
 			Expect(secret.Data).To(HaveKey("jwt-secret"))
 			Expect(secret.Data).To(HaveKey("postgres-url"))
 			Expect(secret.Data).To(HaveKey("database-url"))
+
+			adminSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-admin-credentials"), adminSecret)).To(Succeed())
+			Expect(adminSecret.Data).To(HaveKeyWithValue("admin-email", []byte("admin@shop.local")))
+			Expect(adminSecret.Data).To(HaveKey("admin-password"))
+			Expect(adminSecret.Data["admin-password"]).NotTo(BeEmpty())
 
 			shop := &shopopsv1.Shop{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, shop)).To(Succeed())
@@ -121,6 +140,28 @@ var _ = Describe("Shop Controller", func() {
 			apiService := &corev1.Service{}
 			err = k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiService)
 			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		Context("when admin email is set in spec", func() {
+			BeforeEach(func() {
+				adminEmail = "owner@test-shop.example.com"
+			})
+
+			It("should use admin email from spec when creating admin secret", func() {
+				controllerReconciler := &ShopReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+				}
+
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+
+				adminSecret := &corev1.Secret{}
+				Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-admin-credentials"), adminSecret)).To(Succeed())
+				Expect(adminSecret.Data).To(HaveKeyWithValue("admin-email", []byte("owner@test-shop.example.com")))
+				Expect(adminSecret.Data).To(HaveKey("admin-password"))
+				Expect(adminSecret.Data["admin-password"]).NotTo(BeEmpty())
+			})
 		})
 	})
 })

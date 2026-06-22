@@ -63,6 +63,9 @@ type ShopSpec struct {
 	// +optional
 	Host string `json:"host,omitempty"`
 
+	// Email address for the shop admin.
+	AdminEmail string `json:"adminEmail"`
+
 	// Name of the DiscordChannel CR to use for alerts.
 	// +optional
 	DiscordChannelRef string `json:"discordChannelRef,omitempty"`

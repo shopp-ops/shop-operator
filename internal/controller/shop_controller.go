@@ -9,6 +9,7 @@ import (
 	"time"
 
 	shopopsv1 "github.com/shopp-ops/shop-operator/api/v1"
+	"github.com/shopp-ops/shop-operator/internal/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -99,6 +100,11 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
 		logger.Error(err, "Failed to reconcile Secret")
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileAdminSecret(ctx, shop); err != nil {
+		logger.Error(err, "Failed to reconcile admin secret")
 		return ctrl.Result{}, err
 	}
 
@@ -213,14 +219,9 @@ func (r *ShopReconciler) reconcileAppSecretBase(ctx context.Context, shop *shopo
 		if len(secret.Data["db-password"]) == 0 {
 			secret.Data["db-password"] = []byte(shop.Name + "-password")
 		}
-		if len(secret.Data["admin-password"]) == 0 {
-			secret.Data["admin-password"] = []byte("changeme")
-		}
+
 		if len(secret.Data["jwt-secret"]) == 0 {
 			secret.Data["jwt-secret"] = []byte("change-me-in-production")
-		}
-		if len(secret.Data["admin-email"]) == 0 {
-			secret.Data["admin-email"] = []byte("admin@shop.local")
 		}
 
 		secret.Type = corev1.SecretTypeOpaque
@@ -277,8 +278,52 @@ func (r *ShopReconciler) reconcileAppSecretDatabaseURL(ctx context.Context, shop
 	return err
 }
 
+func (r *ShopReconciler) reconcileAdminSecret(ctx context.Context, shop *shopopsv1.Shop) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: r.adminSecretName(shop), Namespace: shop.Namespace}}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		if err := controllerutil.SetControllerReference(shop, secret, r.Scheme); err != nil {
+			return err
+		}
+
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		maps.Copy(secret.Labels, r.labelsForShop(shop))
+
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		if len(secret.Data["admin-password"]) == 0 {
+			password, err := utils.GeneratePassword(24)
+			if err != nil {
+				return err
+			}
+			secret.Data["admin-password"] = []byte(password)
+		}
+
+		if len(secret.Data["admin-email"]) == 0 {
+			if shop.Spec.AdminEmail != "" {
+				secret.Data["admin-email"] = []byte(shop.Spec.AdminEmail)
+			} else {
+				secret.Data["admin-email"] = []byte("admin@shop.local")
+			}
+		}
+		secret.Type = corev1.SecretTypeOpaque
+
+		return nil
+	})
+
+	return err
+}
+
 func (r *ShopReconciler) appSecretName(shop *shopopsv1.Shop) string {
 	return fmt.Sprintf("%s-app-secret", shop.Name)
+}
+
+func (r *ShopReconciler) adminSecretName(shop *shopopsv1.Shop) string {
+	return fmt.Sprintf("%s-admin-credentials", shop.Name)
 }
 
 func (r *ShopReconciler) reconcileDatabase(ctx context.Context, shop *shopopsv1.Shop) (string, shopopsv1.DatabaseType, metav1.Condition, error) {
@@ -1016,13 +1061,21 @@ func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop) []corev1.EnvVar {
 			},
 		}
 	}
+	adminSecretRef := func(key string) *corev1.EnvVarSource {
+		return &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: r.adminSecretName(shop)},
+				Key:                  key,
+			},
+		}
+	}
 
 	return []corev1.EnvVar{
 		{Name: "PORT", Value: fmt.Sprintf("%d", apiContainerPort)},
 		{Name: "CORS_ORIGIN", Value: fmt.Sprintf("http://%s", shop.Spec.Host)},
 		{Name: "DATABASE_URL", ValueFrom: secretRef("database-url")},
-		{Name: "ADMIN_EMAIL", ValueFrom: secretRef("admin-email")},
-		{Name: "ADMIN_PASSWORD", ValueFrom: secretRef("admin-password")},
+		{Name: "ADMIN_EMAIL", ValueFrom: adminSecretRef("admin-email")},
+		{Name: "ADMIN_PASSWORD", ValueFrom: adminSecretRef("admin-password")},
 		{Name: "JWT_SECRET", ValueFrom: secretRef("jwt-secret")},
 		{Name: "WALLET_ADDRESS", Value: r.walletAddress(shop)},
 		{Name: "SHOP_NAME", Value: r.displayName(shop)},
