@@ -21,10 +21,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -84,7 +83,7 @@ var _ = Describe("Shop Controller", func() {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 
-		It("should successfully reconcile the resource and create owned resources", func() {
+		It("should gracefully report missing database CRDs in envtest", func() {
 			By("reconciling the created resource")
 			controllerReconciler := &ShopReconciler{
 				Client: k8sClient,
@@ -94,39 +93,34 @@ var _ = Describe("Shop Controller", func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			apiDeployment := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiDeployment)).To(Succeed())
-			Expect(*apiDeployment.Spec.Replicas).To(Equal(int32(2)))
-			Expect(apiDeployment.Spec.Template.Spec.Containers).To(HaveLen(1))
-			Expect(apiDeployment.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:latest"))
-
-			webDeployment := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-web"), webDeployment)).To(Succeed())
-
-			apiService := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiService)).To(Succeed())
-			Expect(apiService.Spec.Ports).To(HaveLen(1))
-			Expect(apiService.Spec.Ports[0].Port).To(Equal(int32(80)))
-
-			webService := &corev1.Service{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-web"), webService)).To(Succeed())
-
 			secret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-app-secret"), secret)).To(Succeed())
 			Expect(secret.Data).To(HaveKeyWithValue("username", []byte("shop")))
 			Expect(secret.Data).To(HaveKeyWithValue("password", []byte("test-resource-password")))
 			Expect(secret.Data).To(HaveKey("admin-email"))
 			Expect(secret.Data).To(HaveKey("jwt-secret"))
-
-			ingress := &networkingv1.Ingress{}
-			Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-ingress"), ingress)).To(Succeed())
-			Expect(ingress.Spec.Rules).To(HaveLen(1))
-			Expect(ingress.Spec.Rules[0].Host).To(Equal("test-shop.example.com"))
+			Expect(secret.Data).To(HaveKey("postgres-url"))
+			Expect(secret.Data).To(HaveKey("database-url"))
 
 			shop := &shopopsv1.Shop{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, shop)).To(Succeed())
 			Expect(shop.Status.URL).To(Equal("https://test-shop.example.com"))
-			Expect(shop.Status.Phase).NotTo(BeEmpty())
+			Expect(shop.Status.Phase).To(Equal("Degraded"))
+			Expect(shop.Status.ActiveDatabase).To(Equal(shopopsv1.DatabaseStandard))
+
+			databaseCondition := apimeta.FindStatusCondition(shop.Status.Conditions, "DatabaseReady")
+			Expect(databaseCondition).NotTo(BeNil())
+			Expect(databaseCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(databaseCondition.Reason).To(Equal("DatabaseCRDMissing"))
+
+			availableCondition := apimeta.FindStatusCondition(shop.Status.Conditions, "Available")
+			Expect(availableCondition).NotTo(BeNil())
+			Expect(availableCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(availableCondition.Reason).To(Equal("WaitingForDatabase"))
+
+			apiService := &corev1.Service{}
+			err = k8sClient.Get(ctx, namespacedName("default", "test-resource-api"), apiService)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 })
