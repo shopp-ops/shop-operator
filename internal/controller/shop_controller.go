@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	shopopsv1 "github.com/shopp-ops/shop-operator/api/v1"
 	"github.com/shopp-ops/shop-operator/internal/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -86,7 +87,6 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
-// // +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=wallets,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -217,7 +217,17 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *ShopReconciler) reconcileWalletAddress(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
-	if shop.Spec.WalletAddress != "" {
+	specifiedAddress := shop.Spec.WalletAddress
+	if specifiedAddress != "" {
+		if !common.IsHexAddress(specifiedAddress) {
+			return "", metav1.Condition{
+				Type:               "WalletReady",
+				Status:             metav1.ConditionFalse,
+				Reason:             "InvalidWalletAddress",
+				Message:            fmt.Sprintf("Wallet address %q is not a valid Ethereum address", specifiedAddress),
+				ObservedGeneration: shop.Generation,
+			}, nil
+		}
 		return shop.Spec.WalletAddress, metav1.Condition{
 			Type:               "WalletReady",
 			Status:             metav1.ConditionTrue,
