@@ -90,6 +90,9 @@ type ShopStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	ActiveDatabase DatabaseType `json:"activeDatabase,omitempty"`
+
+	// +optional
+	WalletAddress string `json:"walletAddress,omitempty"`
 }
 
 // +kubebuilder:object:root=true
