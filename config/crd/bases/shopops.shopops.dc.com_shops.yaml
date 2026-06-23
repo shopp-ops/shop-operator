@@ -176,6 +176,8 @@ spec:
               url:
                 description: Public URL of the shop (derived from spec.host).
                 type: string
+              walletAddress:
+                type: string
             type: object
         required:
         - spec
