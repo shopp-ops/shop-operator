@@ -86,6 +86,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
+// // +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=wallets,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -96,6 +97,11 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	shop := &shopopsv1.Shop{}
 	if err := r.Get(ctx, req.NamespacedName, shop); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	resolvedWalletAddress, walletCondition, err := r.reconcileWalletAddress(ctx, shop)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if err := r.reconcileAppSecretBase(ctx, shop); err != nil {
@@ -114,6 +120,17 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	if walletCondition.Status != metav1.ConditionTrue {
+		logger.Info("Wallet is not ready yet, skipping Deployment reconciliation", "reason", walletCondition.Reason)
+
+		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition, activeDB, resolvedWalletAddress, walletCondition); err != nil {
+			logger.Error(err, "Failed to reconcile status")
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	if err := r.reconcileAppSecretDatabaseURL(ctx, shop, databaseURL); err != nil {
 		logger.Error(err, "Failed to update database URL in Secret")
 		return ctrl.Result{}, err
@@ -122,7 +139,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if databaseCondition.Status != metav1.ConditionTrue {
 		logger.Info("Database is not ready yet, skipping Deployment reconciliation", "reason", databaseCondition.Reason)
 
-		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition, activeDB); err != nil {
+		if err := r.reconcileStatus(ctx, shop, nil, databaseCondition, activeDB, resolvedWalletAddress, walletCondition); err != nil {
 			logger.Error(err, "Failed to reconcile status")
 			return ctrl.Result{}, err
 		}
@@ -144,7 +161,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		port:      apiContainerPort,
 		labels:    r.labelsForApi(shop),
 		selectors: r.selectorLabelsForApi(shop),
-		env:       r.apiEnvVars(shop),
+		env:       r.apiEnvVars(shop, resolvedWalletAddress),
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile API Deployment")
@@ -177,7 +194,7 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, shop, apiDeployment, databaseCondition, activeDB); err != nil {
+	if err := r.reconcileStatus(ctx, shop, apiDeployment, databaseCondition, activeDB, resolvedWalletAddress, walletCondition); err != nil {
 		logger.Error(err, "Failed to reconcile status")
 		return ctrl.Result{}, err
 	}
@@ -197,6 +214,85 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Named("shop").
 		Complete(r)
+}
+
+func (r *ShopReconciler) reconcileWalletAddress(ctx context.Context, shop *shopopsv1.Shop) (string, metav1.Condition, error) {
+	if shop.Spec.WalletAddress != "" {
+		return shop.Spec.WalletAddress, metav1.Condition{
+			Type:               "WalletReady",
+			Status:             metav1.ConditionTrue,
+			Reason:             "Provided",
+			Message:            "Using wallet address from spec",
+			ObservedGeneration: shop.Generation,
+		}, nil
+	}
+
+	walletName := fmt.Sprintf("%s-wallet", shop.Name)
+	wallet := &shopopsv1.Wallet{}
+	err := r.Get(ctx, namespacedName(shop.Namespace, walletName), wallet)
+	if err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return "", metav1.Condition{
+				Type:               "WalletReady",
+				Status:             metav1.ConditionFalse,
+				Reason:             "WalletCRDMissing",
+				Message:            "Wallet CRD is not installed in the target cluster",
+				ObservedGeneration: shop.Generation,
+			}, nil
+		}
+
+		if !apierrors.IsNotFound(err) {
+			return "", metav1.Condition{}, err
+		}
+
+		wallet = &shopopsv1.Wallet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      walletName,
+				Namespace: shop.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "shop-operator",
+					"shopops.shopops.dc.com/shop":  shop.Name,
+				},
+				Annotations: map[string]string{
+					"shopops.shopops.dc.com/created-for-shop": shop.Name,
+				},
+			},
+			Spec: shopopsv1.WalletSpec{
+				Network: "sepolia",
+			},
+		}
+
+		if err := r.Create(ctx, wallet); err != nil {
+			return "", metav1.Condition{}, err
+		}
+
+		return "", metav1.Condition{
+			Type:               "WalletReady",
+			Status:             metav1.ConditionFalse,
+			Reason:             "WalletCreating",
+			Message:            fmt.Sprintf("Created Wallet %q and waiting for it to become ready", walletName),
+			ObservedGeneration: shop.Generation,
+		}, nil
+	}
+
+	readyCondition := apimeta.FindStatusCondition(wallet.Status.Conditions, "Ready")
+	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue || wallet.Status.Address == "" {
+		return "", metav1.Condition{
+			Type:               "WalletReady",
+			Status:             metav1.ConditionFalse,
+			Reason:             "WalletPending",
+			Message:            fmt.Sprintf("Waiting for Wallet %q to expose status.address", walletName),
+			ObservedGeneration: shop.Generation,
+		}, nil
+	}
+
+	return wallet.Status.Address, metav1.Condition{
+		Type:               "WalletReady",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Resolved",
+		Message:            fmt.Sprintf("Resolved wallet address from Wallet %q", walletName),
+		ObservedGeneration: shop.Generation,
+	}, nil
 }
 
 func (r *ShopReconciler) reconcileAppSecretBase(ctx context.Context, shop *shopopsv1.Shop) error {
@@ -972,7 +1068,7 @@ func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shopopsv1.S
 	return err
 }
 
-func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Shop, deployment *appsv1.Deployment, databaseCondition metav1.Condition, activeDB shopopsv1.DatabaseType) error {
+func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Shop, deployment *appsv1.Deployment, databaseCondition metav1.Condition, activeDB shopopsv1.DatabaseType, walletAddress string, walletCondition metav1.Condition) error {
 	latest := &shopopsv1.Shop{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(shop), latest); err != nil {
 		return err
@@ -1009,14 +1105,30 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 	latest.Status.Replicas = availableReplicas
 	latest.Status.URL = r.shopURL(shop)
 
+	if walletAddress != "" {
+		latest.Status.WalletAddress = walletAddress
+	}
+
 	apimeta.SetStatusCondition(&latest.Status.Conditions, readyCondition)
 	apimeta.SetStatusCondition(&latest.Status.Conditions, databaseCondition)
+	apimeta.SetStatusCondition(&latest.Status.Conditions, walletCondition)
 
 	switch {
-	case readyCondition.Status == metav1.ConditionTrue && databaseCondition.Status == metav1.ConditionTrue:
+	case readyCondition.Status == metav1.ConditionTrue &&
+		databaseCondition.Status == metav1.ConditionTrue &&
+		walletCondition.Status == metav1.ConditionTrue:
 		latest.Status.Phase = "Ready"
-	case databaseCondition.Status == metav1.ConditionFalse && (databaseCondition.Reason == "DatabaseCRDMissing" || databaseCondition.Reason == "UnsupportedDatabaseType" || databaseCondition.Reason == "MigrationFailed"):
+
+	case walletCondition.Status == metav1.ConditionFalse &&
+		(walletCondition.Reason == "WalletCRDMissing" || walletCondition.Reason == "InvalidWalletAddress"):
 		latest.Status.Phase = "Degraded"
+
+	case databaseCondition.Status == metav1.ConditionFalse &&
+		(databaseCondition.Reason == "DatabaseCRDMissing" ||
+			databaseCondition.Reason == "UnsupportedDatabaseType" ||
+			databaseCondition.Reason == "MigrationFailed"):
+		latest.Status.Phase = "Degraded"
+
 	default:
 		latest.Status.Phase = "Progressing"
 	}
@@ -1052,7 +1164,7 @@ func (r *ShopReconciler) desiredReplicas(shop *shopopsv1.Shop) int32 {
 	return 2
 }
 
-func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop) []corev1.EnvVar {
+func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop, walletAddress string) []corev1.EnvVar {
 	secretRef := func(key string) *corev1.EnvVarSource {
 		return &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
@@ -1077,7 +1189,7 @@ func (r *ShopReconciler) apiEnvVars(shop *shopopsv1.Shop) []corev1.EnvVar {
 		{Name: "ADMIN_EMAIL", ValueFrom: adminSecretRef("admin-email")},
 		{Name: "ADMIN_PASSWORD", ValueFrom: adminSecretRef("admin-password")},
 		{Name: "JWT_SECRET", ValueFrom: secretRef("jwt-secret")},
-		{Name: "WALLET_ADDRESS", Value: r.walletAddress(shop)},
+		{Name: "WALLET_ADDRESS", Value: walletAddress},
 		{Name: "SHOP_NAME", Value: r.displayName(shop)},
 		{Name: "DB_MODE", Value: string(shop.Spec.Database.Type)},
 	}
@@ -1098,14 +1210,6 @@ func (r *ShopReconciler) displayName(shop *shopopsv1.Shop) string {
 	}
 
 	return shop.Name
-}
-
-func (r *ShopReconciler) walletAddress(shop *shopopsv1.Shop) string {
-	if shop.Spec.WalletAddress != "" {
-		return shop.Spec.WalletAddress
-	}
-
-	return "0x0000000000000000000000000000000000000000"
 }
 
 func (r *ShopReconciler) reconcileMongoDatabaseURL(ctx context.Context, shop *shopopsv1.Shop) (string, error) {
