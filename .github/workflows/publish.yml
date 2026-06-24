@@ -3,7 +3,6 @@ on:
   push:
     branches:
       - main
-      - ci/chart-publish
     tags:
       - "v*"
   workflow_dispatch:
@@ -104,7 +103,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+            VERSION="0.0.1-$(git rev-parse --short HEAD)"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
