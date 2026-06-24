@@ -6,6 +6,10 @@ cliVersion: 4.14.0
 domain: shopops.dc.com
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: dist
 projectName: shop-operator
 repo: github.com/shopp-ops/shop-operator
 resources:
