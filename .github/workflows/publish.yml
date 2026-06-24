@@ -1,21 +1,22 @@
 name: Publish
-
 on:
   push:
     branches:
       - main
+      - ci/chart-publish
     tags:
-      - 'v*'
-
+      - "v*"
+  workflow_dispatch:
 permissions: {}
-
 jobs:
-  publish:
+  publish-operator:
     permissions:
       contents: read
       packages: write
-    name: Build and push image
+    name: Build and push operator image
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
@@ -53,3 +54,74 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-chart:
+    permissions:
+      contents: read
+      packages: write
+    name: Build and push Helm chart (OCI)
+    runs-on: ubuntu-latest
+    needs: publish-operator
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install kubebuilder
+        run: |
+          curl -L -o kubebuilder \
+            "https://github.com/kubernetes-sigs/kubebuilder/releases/latest/download/kubebuilder_linux_amd64"
+          chmod +x kubebuilder
+          sudo mv kubebuilder /usr/local/bin/
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Generate manifests
+        run: make manifests generate
+
+      - name: Generate Helm chart via kubebuilder
+        run: kubebuilder edit --plugins=helm.kubebuilder.io/v2-alpha
+
+      - name: Patch image in values.yaml
+        env:
+          IMAGE_TAG: ${{ needs.publish-operator.outputs.image-tag }}
+        run: |
+          yq -i '
+            .manager.image.repository = "ghcr.io/shopp-ops/shop-operator" |
+            .manager.image.tag = strenv(IMAGE_TAG)
+          ' dist/chart/values.yaml
+
+      - name: Determine chart version
+        id: chart-version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package Helm chart
+        run: |
+          helm package dist/chart \
+            --version "${{ steps.chart-version.outputs.version }}" \
+            --app-version "${{ needs.publish-operator.outputs.image-tag }}" \
+            --destination /tmp/helm-output
+
+      - name: Log in to ghcr.io (Helm)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Push Helm chart as OCI
+        run: |
+          helm push /tmp/helm-output/*.tgz oci://ghcr.io/shopp-ops/charts
