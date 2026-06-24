@@ -87,6 +87,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -877,7 +878,6 @@ func (r *ShopReconciler) deleteMongoRBAC(ctx context.Context, shop *shopopsv1.Sh
 	return nil
 }
 
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 func (r *ShopReconciler) reconcileMigrationJob(ctx context.Context, shop *shopopsv1.Shop, from, to string) (bool, *metav1.Condition, error) {
 	jobName := r.migrationJobName(shop, from, to)
 
