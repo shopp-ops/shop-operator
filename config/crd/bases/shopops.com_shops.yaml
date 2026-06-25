@@ -4,20 +4,38 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: discordchannels.shopops.shopops.dc.com
+  name: shops.shopops.com
 spec:
-  group: shopops.shopops.dc.com
+  group: shopops.com
   names:
-    kind: DiscordChannel
-    listKind: DiscordChannelList
-    plural: discordchannels
-    singular: discordchannel
+    kind: Shop
+    listKind: ShopList
+    plural: shops
+    shortNames:
+    - sh
+    singular: shop
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.availability
+      name: Availability
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
-        description: DiscordChannel is the Schema for the discordchannels API
+        description: Shop is the Schema for the shops API
         properties:
           apiVersion:
             description: |-
@@ -37,27 +55,59 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of DiscordChannel
+            description: spec defines the desired state of Shop
             properties:
-              foo:
-                description: foo is an example field of DiscordChannel. Edit discordchannel_types.go
-                  to remove/update
+              adminEmail:
+                description: Email address for the shop admin.
                 type: string
+              apiImage:
+                description: Docker image for the shop backend application.
+                type: string
+              availability:
+                enum:
+                - standard
+                - high
+                type: string
+              database:
+                description: Database configuration.
+                properties:
+                  type:
+                    enum:
+                    - standard
+                    - light
+                    type: string
+                required:
+                - type
+                type: object
+              discordChannelRef:
+                description: Name of the DiscordChannel CR to use for alerts.
+                type: string
+              host:
+                description: Ingress hostname for the shop (e.g. myshop.example.com).
+                type: string
+              name:
+                description: Display name of the shop.
+                type: string
+              walletAddress:
+                description: Ethereum-compatible wallet address for receiving payments.
+                type: string
+              webImage:
+                description: Docker image for the shop frontend application.
+                type: string
+            required:
+            - adminEmail
+            - apiImage
+            - availability
+            - database
+            - name
+            - webImage
             type: object
           status:
-            description: status defines the observed state of DiscordChannel
+            description: status defines the observed state of Shop
             properties:
+              activeDatabase:
+                type: string
               conditions:
-                description: |-
-                  conditions represent the current state of the DiscordChannel resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +166,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              phase:
+                description: Lifecycle phase of the Shop.
+                type: string
+              replicas:
+                description: Number of available replicas.
+                format: int32
+                type: integer
+              url:
+                description: Public URL of the shop (derived from spec.host).
+                type: string
+              walletAddress:
+                type: string
             type: object
         required:
         - spec

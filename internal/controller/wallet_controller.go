@@ -41,9 +41,9 @@ type WalletReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=wallets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=wallets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=wallets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=shopops.com,resources=wallets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shopops.com,resources=wallets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=shopops.com,resources=wallets/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create
 
 func (r *WalletReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -75,8 +75,8 @@ func (r *WalletReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				Name:      secretName,
 				Namespace: wallet.Namespace,
 				Labels: map[string]string{
-					"app.kubernetes.io/managed-by":  "shop-operator",
-					"shopops.shopops.dc.com/wallet": wallet.Name,
+					"app.kubernetes.io/managed-by": "shop-operator",
+					"shopops.com/wallet":           wallet.Name,
 				},
 			},
 			StringData: map[string]string{

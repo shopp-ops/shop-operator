@@ -174,8 +174,8 @@ var _ = Describe("Shop Controller", func() {
 				Expect(k8sClient.Get(ctx, namespacedName("default", "test-resource-wallet"), wallet)).To(Succeed())
 				Expect(wallet.Spec.Network).To(Equal("sepolia"))
 				Expect(wallet.OwnerReferences).To(BeEmpty())
-				Expect(wallet.Annotations).To(HaveKeyWithValue("shopops.shopops.dc.com/created-for-shop", "test-resource"))
-				Expect(wallet.Labels).To(HaveKeyWithValue("shopops.shopops.dc.com/shop", "test-resource"))
+				Expect(wallet.Annotations).To(HaveKeyWithValue("shopops.com/created-for-shop", "test-resource"))
+				Expect(wallet.Labels).To(HaveKeyWithValue("shopops.com/shop", "test-resource"))
 
 				shop := &shopopsv1.Shop{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, shop)).To(Succeed())

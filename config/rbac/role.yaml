@@ -92,7 +92,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels
   - shops
@@ -106,7 +106,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels/finalizers
   - shops/finalizers
@@ -114,7 +114,7 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels/status
   - shops/status

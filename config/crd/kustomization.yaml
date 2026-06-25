@@ -2,9 +2,9 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/shopops.shopops.dc.com_shops.yaml
-- bases/shopops.shopops.dc.com_discordchannels.yaml
-- bases/shopops.shopops.dc.com_wallets.yaml
+  - bases/shopops.com_shops.yaml
+  - bases/shopops.com_discordchannels.yaml
+  - bases/shopops.com_wallets.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
