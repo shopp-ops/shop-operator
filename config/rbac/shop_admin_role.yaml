@@ -1,7 +1,7 @@
 # This rule is not used by the project shop-operator itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants full permissions ('*') over shopops.shopops.dc.com.
+# Grants full permissions ('*') over shopops.com.
 # This role is intended for users authorized to modify roles and bindings within the cluster,
 # enabling them to delegate specific permissions to other users or groups as needed.
 
@@ -13,15 +13,15 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: shop-admin-role
 rules:
-- apiGroups:
-  - shopops.shopops.dc.com
-  resources:
-  - shops
-  verbs:
-  - '*'
-- apiGroups:
-  - shopops.shopops.dc.com
-  resources:
-  - shops/status
-  verbs:
-  - get
+  - apiGroups:
+      - shopops.com
+    resources:
+      - shops
+    verbs:
+      - "*"
+  - apiGroups:
+      - shopops.com
+    resources:
+      - shops/status
+    verbs:
+      - get

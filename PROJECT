@@ -3,7 +3,7 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.14.0
-domain: shopops.dc.com
+domain: shopops.com
 layout:
 - go.kubebuilder.io/v4
 plugins:
@@ -17,7 +17,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: shopops.dc.com
+  domain: shopops.com
   group: shopops
   kind: Shop
   path: github.com/shopp-ops/shop-operator/api/v1
@@ -26,7 +26,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: shopops.dc.com
+  domain: shopops.com
   group: shopops
   kind: DiscordChannel
   path: github.com/shopp-ops/shop-operator/api/v1
@@ -35,7 +35,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: shopops.dc.com
+  domain: shopops.com
   group: shopops
   kind: Wallet
   path: github.com/shopp-ops/shop-operator/api/v1

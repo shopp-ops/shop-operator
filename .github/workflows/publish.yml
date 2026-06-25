@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - chore/refactor-domain
     tags:
       - "v*"
   workflow_dispatch:

@@ -1,7 +1,7 @@
 # This rule is not used by the project shop-operator itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants permissions to create, update, and delete resources within the shopops.shopops.dc.com.
+# Grants permissions to create, update, and delete resources within the shopops.com.
 # This role is intended for users who need to manage these resources
 # but should not control RBAC or manage permissions for others.
 
@@ -13,21 +13,21 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: discordchannel-editor-role
 rules:
-- apiGroups:
-  - shopops.shopops.dc.com
-  resources:
-  - discordchannels
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - shopops.shopops.dc.com
-  resources:
-  - discordchannels/status
-  verbs:
-  - get
+  - apiGroups:
+      - shopops.com
+    resources:
+      - discordchannels
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - shopops.com
+    resources:
+      - discordchannels/status
+    verbs:
+      - get
