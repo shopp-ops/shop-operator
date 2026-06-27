@@ -76,9 +76,9 @@ type ShopReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=shops,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=shops/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=shopops.shopops.dc.com,resources=shops/finalizers,verbs=update
+// +kubebuilder:rbac:groups=shopops.com,resources=shops,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shopops.com,resources=shops/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=shopops.com,resources=shops/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
@@ -87,6 +87,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -261,10 +262,10 @@ func (r *ShopReconciler) reconcileWalletAddress(ctx context.Context, shop *shopo
 				Namespace: shop.Namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "shop-operator",
-					"shopops.shopops.dc.com/shop":  shop.Name,
+					"shopops.com/shop":             shop.Name,
 				},
 				Annotations: map[string]string{
-					"shopops.shopops.dc.com/created-for-shop": shop.Name,
+					"shopops.com/created-for-shop": shop.Name,
 				},
 			},
 			Spec: shopopsv1.WalletSpec{
@@ -877,7 +878,6 @@ func (r *ShopReconciler) deleteMongoRBAC(ctx context.Context, shop *shopopsv1.Sh
 	return nil
 }
 
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 func (r *ShopReconciler) reconcileMigrationJob(ctx context.Context, shop *shopopsv1.Shop, from, to string) (bool, *metav1.Condition, error) {
 	jobName := r.migrationJobName(shop, from, to)
 
@@ -1210,7 +1210,7 @@ func (r *ShopReconciler) labelsForShop(shop *shopopsv1.Shop) map[string]string {
 		"app.kubernetes.io/name":       "shop",
 		"app.kubernetes.io/instance":   shop.Name,
 		"app.kubernetes.io/managed-by": "shop-operator",
-		"shopops.shopops.dc.com/shop":  shop.Name,
+		"shopops.com/shop":             shop.Name,
 	}
 }
 
@@ -1274,9 +1274,9 @@ func (r *ShopReconciler) migrationJobName(shop *shopopsv1.Shop, from, to string)
 
 func (r *ShopReconciler) migrationJobLabels(shop *shopopsv1.Shop, from, to string) map[string]string {
 	labels := r.labelsForShop(shop)
-	labels["shopops.shopops.dc.com/migration-from"] = from
-	labels["shopops.shopops.dc.com/migration-to"] = to
-	labels["shopops.shopops.dc.com/migration-generation"] = fmt.Sprintf("%d", shop.Generation)
+	labels["shopops.com/migration-from"] = from
+	labels["shopops.com/migration-to"] = to
+	labels["shopops.com/migration-generation"] = fmt.Sprintf("%d", shop.Generation)
 	return labels
 }
 
@@ -1334,36 +1334,36 @@ func (r *ShopReconciler) webServiceName(shop *shopopsv1.Shop) string {
 
 func (r *ShopReconciler) labelsForApi(shop *shopopsv1.Shop) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":           "shop-api",
-		"app.kubernetes.io/instance":       shop.Name,
-		"app.kubernetes.io/managed-by":     "shop-operator",
-		"shopops.shopops.dc.com/shop":      shop.Name,
-		"shopops.shopops.dc.com/component": "api",
+		"app.kubernetes.io/name":       "shop-api",
+		"app.kubernetes.io/instance":   shop.Name,
+		"app.kubernetes.io/managed-by": "shop-operator",
+		"shopops.com/shop":             shop.Name,
+		"shopops.com/component":        "api",
 	}
 }
 
 func (r *ShopReconciler) selectorLabelsForApi(shop *shopopsv1.Shop) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/instance":       shop.Name,
-		"shopops.shopops.dc.com/shop":      shop.Name,
-		"shopops.shopops.dc.com/component": "api",
+		"app.kubernetes.io/instance": shop.Name,
+		"shopops.com/shop":           shop.Name,
+		"shopops.com/component":      "api",
 	}
 }
 
 func (r *ShopReconciler) labelsForWeb(shop *shopopsv1.Shop) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":           "shop-web",
-		"app.kubernetes.io/instance":       shop.Name,
-		"app.kubernetes.io/managed-by":     "shop-operator",
-		"shopops.shopops.dc.com/shop":      shop.Name,
-		"shopops.shopops.dc.com/component": "web",
+		"app.kubernetes.io/name":       "shop-web",
+		"app.kubernetes.io/instance":   shop.Name,
+		"app.kubernetes.io/managed-by": "shop-operator",
+		"shopops.com/shop":             shop.Name,
+		"shopops.com/component":        "web",
 	}
 }
 
 func (r *ShopReconciler) selectorLabelsForWeb(shop *shopopsv1.Shop) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/instance":       shop.Name,
-		"shopops.shopops.dc.com/shop":      shop.Name,
-		"shopops.shopops.dc.com/component": "web",
+		"app.kubernetes.io/instance": shop.Name,
+		"shopops.com/shop":           shop.Name,
+		"shopops.com/component":      "web",
 	}
 }

@@ -1,4 +1,4 @@
-apiVersion: shopops.shopops.dc.com/v1
+apiVersion: shopops.com/v1
 kind: DiscordChannel
 metadata:
   labels:

@@ -31,6 +31,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - mongodbcommunity.mongodb.com
   resources:
   - mongodbcommunity
@@ -80,7 +92,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels
   - shops
@@ -94,7 +106,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels/finalizers
   - shops/finalizers
@@ -102,7 +114,7 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - shopops.shopops.dc.com
+  - shopops.com
   resources:
   - discordchannels/status
   - shops/status
