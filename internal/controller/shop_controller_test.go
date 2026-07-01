@@ -213,5 +213,43 @@ var _ = Describe("Shop Controller", func() {
 				Expect(adminSecret.Data["admin-password"]).NotTo(BeEmpty())
 			})
 		})
+
+		It("sets phase=Failed when an api pod is ImagePullBackOff", func() {
+			reconciler := &ShopReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			// Initial reconcile (shop already created by JustBeforeEach)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			shop := &shopopsv1.Shop{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, shop)).To(Succeed())
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "api-stuck",
+					Namespace: shop.Namespace,
+					Labels:    reconciler.selectorLabelsForApi(shop),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "api", Image: "shop-api:dev"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, pod)
+			})
+			pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "api", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(shop)})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &shopopsv1.Shop{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(shop), updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal("Failed"))
+		})
 	})
 })
