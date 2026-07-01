@@ -1162,22 +1162,27 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 	return r.Status().Update(ctx, latest)
 }
 
-// failedPodReason returns a non-empty (reason, message) if any pod in the shop's
-// namespace is stuck in a terminal-ish waiting state. Non-latched: callers
-// recompute every reconcile, so recovery clears it automatically.
+// failedPodReason returns a non-empty (reason, message) if any api or web pod in the
+// shop's namespace is stuck in a terminal-ish waiting state. Scoped to api/web selector
+// labels to avoid false positives from database pods (CNPG/Mongo) during startup.
+// Non-latched: callers recompute every reconcile, so recovery clears it automatically.
 func (r *ShopReconciler) failedPodReason(ctx context.Context, shop *shopopsv1.Shop) (string, string) {
 	stuck := map[string]bool{"ImagePullBackOff": true, "ErrImagePull": true, "CrashLoopBackOff": true, "CreateContainerConfigError": true}
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(shop.Namespace)); err != nil {
-		return "", ""
-	}
-	for i := range pods.Items {
-		for _, cs := range pods.Items[i].Status.ContainerStatuses {
-			if cs.State.Waiting != nil && stuck[cs.State.Waiting.Reason] {
-				return cs.State.Waiting.Reason, fmt.Sprintf("%s: %s", cs.Name, cs.State.Waiting.Reason)
+
+	for _, sel := range []map[string]string{r.selectorLabelsForApi(shop), r.selectorLabelsForWeb(shop)} {
+		var pods corev1.PodList
+		if err := r.List(ctx, &pods, client.InNamespace(shop.Namespace), client.MatchingLabels(sel)); err != nil {
+			return "", ""
+		}
+		for i := range pods.Items {
+			for _, cs := range pods.Items[i].Status.ContainerStatuses {
+				if cs.State.Waiting != nil && stuck[cs.State.Waiting.Reason] {
+					return cs.State.Waiting.Reason, fmt.Sprintf("%s: %s", cs.Name, cs.State.Waiting.Reason)
+				}
 			}
 		}
 	}
+
 	return "", ""
 }
 
