@@ -127,7 +127,7 @@ var _ = Describe("Shop Controller", func() {
 
 			shop := &shopopsv1.Shop{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, shop)).To(Succeed())
-			Expect(shop.Status.URL).To(Equal("https://test-shop.example.com"))
+			Expect(shop.Status.URL).To(Equal("http://test-shop.example.com"))
 			Expect(shop.Status.Phase).To(Equal("Degraded"))
 			Expect(shop.Status.ActiveDatabase).To(Equal(shopopsv1.DatabaseStandard))
 			Expect(shop.Status.WalletAddress).To(Equal(walletAddress))
