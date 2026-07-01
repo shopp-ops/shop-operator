@@ -80,6 +80,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=shopops.com,resources=shops/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shopops.com,resources=shops/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -1119,11 +1120,22 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 		latest.Status.WalletAddress = walletAddress
 	}
 
+	failReason, failMsg := "", ""
+	if availableReplicas < desiredReplicas {
+		failReason, failMsg = r.failedPodReason(ctx, shop)
+		if failReason != "" {
+			readyCondition.Reason = failReason
+			readyCondition.Message = failMsg
+		}
+	}
+
 	apimeta.SetStatusCondition(&latest.Status.Conditions, readyCondition)
 	apimeta.SetStatusCondition(&latest.Status.Conditions, databaseCondition)
 	apimeta.SetStatusCondition(&latest.Status.Conditions, walletCondition)
 
 	switch {
+	case failReason != "":
+		latest.Status.Phase = "Failed"
 	case readyCondition.Status == metav1.ConditionTrue &&
 		databaseCondition.Status == metav1.ConditionTrue &&
 		walletCondition.Status == metav1.ConditionTrue:
@@ -1148,6 +1160,30 @@ func (r *ShopReconciler) reconcileStatus(ctx context.Context, shop *shopopsv1.Sh
 	}
 
 	return r.Status().Update(ctx, latest)
+}
+
+// failedPodReason returns a non-empty (reason, message) if any api or web pod in the
+// shop's namespace is stuck in a terminal-ish waiting state. Scoped to api/web selector
+// labels to avoid false positives from database pods (CNPG/Mongo) during startup.
+// Non-latched: callers recompute every reconcile, so recovery clears it automatically.
+func (r *ShopReconciler) failedPodReason(ctx context.Context, shop *shopopsv1.Shop) (string, string) {
+	stuck := map[string]bool{"ImagePullBackOff": true, "ErrImagePull": true, "CrashLoopBackOff": true, "CreateContainerConfigError": true}
+
+	for _, sel := range []map[string]string{r.selectorLabelsForApi(shop), r.selectorLabelsForWeb(shop)} {
+		var pods corev1.PodList
+		if err := r.List(ctx, &pods, client.InNamespace(shop.Namespace), client.MatchingLabels(sel)); err != nil {
+			return "", ""
+		}
+		for i := range pods.Items {
+			for _, cs := range pods.Items[i].Status.ContainerStatuses {
+				if cs.State.Waiting != nil && stuck[cs.State.Waiting.Reason] {
+					return cs.State.Waiting.Reason, fmt.Sprintf("%s: %s", cs.Name, cs.State.Waiting.Reason)
+				}
+			}
+		}
+	}
+
+	return "", ""
 }
 
 func (r *ShopReconciler) desiredDatabaseCluster(shop *shopopsv1.Shop) *unstructured.Unstructured {
@@ -1309,7 +1345,7 @@ func (r *ShopReconciler) shopURL(shop *shopopsv1.Shop) string {
 		return ""
 	}
 
-	return fmt.Sprintf("https://%s", shop.Spec.Host)
+	return fmt.Sprintf("http://%s", shop.Spec.Host)
 }
 
 func namespacedName(namespace, name string) types.NamespacedName {
