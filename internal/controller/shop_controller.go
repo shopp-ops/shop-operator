@@ -1345,7 +1345,7 @@ func (r *ShopReconciler) shopURL(shop *shopopsv1.Shop) string {
 		return ""
 	}
 
-	return fmt.Sprintf("https://%s", shop.Spec.Host)
+	return fmt.Sprintf("http://%s", shop.Spec.Host)
 }
 
 func namespacedName(namespace, name string) types.NamespacedName {
